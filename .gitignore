@@ -1,0 +1,4 @@
+dicts/
+build/
+dist/
+*.spec
