@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 import winapi as w
 from overlay import Mark, Overlay
-from spell import Speller, prefer_spelling
+from spell import SpellResult, Speller, prefer_spelling
 from feedback import Feedback, write_report
 from i18n import t
 from learn import Learner
@@ -111,6 +111,9 @@ def set_autostart(enabled):
 # ---------------------------------------------------------------- core
 
 MAX_MARKS = 5
+WATCH_SECONDS = 30      # Backspace into a fix this soon after it means "that was wrong"
+WATCH_CHARS = 40
+STRIKES_TO_STOP = 2     # erased this many times: never fix the word again
 
 
 @dataclass
@@ -133,6 +136,7 @@ class Fixer:
         self.learn = True
         self.badge = True
         self.early_done = False     # the current word was already switched early
+        self.watch = None           # the last automatic fix, watched for Backspace
         self.learner = Learner()
         self.feedback = Feedback()
         self._badge_seen = None
@@ -204,7 +208,48 @@ class Fixer:
         self.word = []
         self.last_word = None
         self.last_fix = None
+        self.watch = None
         self.clear_marks()
+
+    # --- was an automatic fix wrong? (Backspace into it)
+
+    def start_watch(self, corr, kind, saved, after):
+        """after: characters on screen after the fixed text (0 for an early fix,
+        whose word goes on; the space after a whole word is added by on_boundary)."""
+        self.watch = {"corr": corr, "kind": kind, "saved": saved, "after": after,
+                      "since": time.monotonic()}
+
+    def watch_typed(self, delta):
+        watch = self.watch
+        if watch is None:
+            return
+        if time.monotonic() - watch["since"] > WATCH_SECONDS:
+            self.watch = None
+            return
+        watch["after"] += delta
+        if watch["after"] > WATCH_CHARS:
+            self.watch = None
+        elif watch["after"] < 0:
+            self.watch = None
+            self.fix_erased(watch)
+
+    def fix_erased(self, watch):
+        corr, kind = watch["corr"], watch["kind"]
+        strikes = self.feedback.erase(kind, corr.source_lang, corr.target_lang,
+                                      corr.old_text, corr.new_text)
+        self.stats.undo(kind, corr.new_text, watch["saved"])
+        self.actions.put(self.stats.save)
+        self.actions.put(self.feedback.save)
+        if strikes >= STRIKES_TO_STOP:
+            word = corr.old_text.strip()
+            if self.detector:
+                self.detector.exceptions.add(word.lower())
+            self.actions.put(lambda: add_exception(word))
+        log.info("a %s fix was erased (strike %d)", kind, strikes)
+
+    def doubted(self, corr):
+        """Was a fix of this word erased before? Then ask instead of fixing."""
+        return self.feedback.struck(corr.old_text) > 0
 
     # --- red marks
 
@@ -365,6 +410,7 @@ class Fixer:
                 self.last_fix = None
                 self.learner.erased()
             self.shift_marks(-1)
+            self.watch_typed(-1)
             return False
 
         if vk in BOUNDARY_KEYS:
@@ -381,6 +427,7 @@ class Fixer:
             self.early_done = False
         self.word.append((vk, w.key_down(w.VK_SHIFT), w.caps_on()))
         self.shift_marks(1)
+        self.watch_typed(1)
         if len(self.word) > 40:
             self.word = []
         self.last_fix = None
@@ -398,7 +445,7 @@ class Fixer:
         except Exception:
             log.exception("early check failed")
             return False
-        if corr is None:
+        if corr is None or self.doubted(corr):
             return False
         self.early_done = True
         target = self.by_lang[corr.target_lang]
@@ -407,6 +454,7 @@ class Fixer:
                                   corr.source_lang, corr.target_lang)
         self.actions.put(self.stats.save)
         self.last_fix = (corr, list(self.word), None, "early", saved)
+        self.start_watch(corr, "early", saved, 0)
         erase = len(corr.old_text) - 1     # the last key never reached the app
         self.actions.put(lambda: self.replace(erase, corr.new_text, target.hkl, None))
         log.info("early fix %r -> %r", corr.old_text, corr.new_text)
@@ -416,8 +464,10 @@ class Fixer:
         swallowed = self.check_word(vk)
         if vk == w.VK_SPACE:
             self.shift_marks(1)
+            self.watch_typed(1)
         else:
             self.clear_marks()          # new line or next field: positions are gone
+            self.watch = None
         return swallowed
 
     def check_word(self, vk):
@@ -462,6 +512,11 @@ class Fixer:
                 res = None
             else:
                 corr = Correction(lay.lang, lay.lang, old, lay.type_keys(caps_keys), caps=True)
+        if corr and self.doubted(corr):
+            res = SpellResult(False, corr.old_text, [corr.new_text])
+            corr = None
+        if res and res.auto and self.feedback.struck(res.old_text):
+            res = SpellResult(False, res.old_text, res.suggestions)
         if corr:
             target = self.by_lang[corr.target_lang]
             self.prev_lang = corr.target_lang
@@ -470,6 +525,7 @@ class Fixer:
                                       corr.source_lang, corr.target_lang)
             self.actions.put(self.stats.save)
             self.last_fix = (corr, keys, vk, kind, saved)
+            self.start_watch(corr, kind, saved, 0)
             self.last_word = None
             self.actions.put(lambda: self.replace(len(corr.old_text), corr.new_text,
                                                   target.hkl, vk, toggle_caps=corr.caps))
@@ -482,6 +538,7 @@ class Fixer:
             saved = self.stats.record("spell", corr.old_text, corr.new_text, lay.lang, lay.lang)
             self.actions.put(self.stats.save)
             self.last_fix = (corr, keys, vk, "spell", saved)
+            self.start_watch(corr, "spell", saved, 0)
             self.last_word = None
             self.prev_lang = lay.lang
             self.actions.put(lambda: self.replace(len(corr.old_text), corr.new_text,
@@ -510,6 +567,7 @@ class Fixer:
     # --- Pause/Break
 
     def manual(self):
+        self.watch = None
         if self.last_fix:
             corr, keys, vk, kind, saved = self.last_fix
             self.last_fix = None

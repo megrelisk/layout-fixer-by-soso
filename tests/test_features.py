@@ -77,7 +77,8 @@ def test_pause_undoes_an_early_fix(env):
     fixer.on_key(fake.VK_PAUSE)
     run_actions(fixer)
     assert done[-1] == (4, "ghbd", HKL[EN], None)
-    assert fixer.feedback.undone
+    assert fixer.feedback.undone and "ghbd" in fixer.detector.exceptions
+    fixer.detector.exceptions.discard("ghbd")
 
 
 # --- personal dictionary
@@ -174,3 +175,70 @@ def test_apply_feedback_turns_a_report_into_lessons():
               "learned": [{"lang": "ru", "word": "Сосо"}, {"lang": "xx", "word": "bad"}]}
     assert lessons(report) == {("en", "nika", "nofix"), ("ka", "სახლსი", "word"),
                                ("ru", "сосо", "word")}
+
+
+# --- Backspace into a fix: it was probably wrong
+
+def erase(fake, fixer, n):
+    for _ in range(n):
+        fixer.on_key(fake.VK_BACK)
+
+
+def test_erasing_a_fix_makes_the_program_ask_next_time(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    run_actions(fixer)
+    assert done == [(3, "the", HKL[EN], fake.VK_SPACE)]
+    erase(fake, fixer, 2)                    # the space and the "e" of "the"
+    assert fixer.feedback.struck("teh") == 1
+    assert fixer.stats.totals()["spell"] == 0 and fixer.stats.totals()["undo"] == 1
+    type_text(fake, fixer, EN, "e ")         # finishes "the" by hand: nothing to fix
+    done.clear()
+    type_text(fake, fixer, EN, "teh ")
+    run_actions(fixer)
+    assert done == []                        # not fixed by itself any more...
+    assert fixer.overlay.shown[-1].suggestions == ["the"]   # ...but offered
+
+
+def test_second_erase_leaves_the_word_alone(spell_env):
+    fake, fixer, done = spell_env
+    for _ in range(2):
+        fixer.feedback.erase("spell", EN, EN, "teh", "the")
+    type_text(fake, fixer, EN, "teh ")
+    run_actions(fixer)
+    assert done == []
+    fixer.feedback.strikes.clear()
+
+
+def test_erasing_only_the_next_word_does_not_count(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ok")
+    erase(fake, fixer, 2)                    # "ok" only
+    assert fixer.feedback.struck("teh") == 0
+
+
+def test_late_erase_does_not_count(spell_env, monkeypatch):
+    import app
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    now = app.time.monotonic()
+    monkeypatch.setattr(app.time, "monotonic", lambda: now + 60)
+    erase(fake, fixer, 2)
+    assert fixer.feedback.struck("teh") == 0
+
+
+def test_erasing_an_early_fix_counts(env):
+    fake, fixer, done = env
+    fixer.early = True
+    type_text(fake, fixer, RU, "прив")
+    erase(fake, fixer, 1)
+    assert fixer.feedback.struck("ghbd") == 1
+
+
+def test_erased_twice_goes_to_the_shared_report():
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from apply_feedback import lessons
+    report = {"erased": [{"from": "en", "typed": "teh", "n": 2},
+                         {"from": "en", "typed": "once", "n": 1}]}
+    assert lessons(report) == {("en", "teh", "nofix")}

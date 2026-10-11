@@ -4,6 +4,7 @@
 
 What a report teaches:
 - a fix the user undid: the typed word must never be "fixed" again ("nofix");
+- a fix the user erased with Backspace twice or more: the same;
 - a doubtful word the user kept, or a word the program learned from them:
   a real word, added to the dictionary ("word").
 
@@ -39,7 +40,8 @@ def read_community():
 def lessons(report):
     """(lang, word, kind) entries a report justifies."""
     out = set()
-    for row in report.get("undone", []):
+    erased = [r for r in report.get("erased", []) if r.get("n", 0) >= 2]
+    for row in report.get("undone", []) + erased:
         typed = row.get("typed", "").strip(".,!?;:()\"'«» ")
         if row.get("from") in LANGS and WORD.match(typed):
             out.add((row["from"], typed.lower(), "nofix"))
