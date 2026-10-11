@@ -14,7 +14,7 @@ class FakeWin(types.ModuleType):
     VK_BACK, VK_TAB, VK_RETURN, VK_SHIFT = 0x08, 0x09, 0x0D, 0x10
     VK_CONTROL, VK_MENU, VK_PAUSE, VK_CAPITAL = 0x11, 0x12, 0x13, 0x14
     VK_SPACE, VK_LWIN, VK_RWIN = 0x20, 0x5B, 0x5C
-    VK_LEFT, VK_RIGHT = 0x25, 0x27
+    VK_LEFT, VK_RIGHT, VK_HOME, VK_DELETE, VK_Z = 0x25, 0x27, 0x24, 0x2E, 0x5A
 
     def __init__(self):
         super().__init__("winapi")

@@ -242,3 +242,69 @@ def test_erased_twice_goes_to_the_shared_report():
     report = {"erased": [{"from": "en", "typed": "teh", "n": 2},
                          {"from": "en", "typed": "once", "n": 1}]}
     assert lessons(report) == {("en", "teh", "nofix")}
+
+
+# --- other ways of throwing a fix away
+
+def press(fake, fixer, vk, *held):
+    fake.held.update(held)
+    result = fixer.on_key(vk)
+    fake.held.difference_update(held)
+    return result
+
+
+def test_ctrl_backspace_right_after_a_fix(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    press(fake, fixer, fake.VK_BACK, fake.VK_CONTROL)
+    assert fixer.feedback.struck("teh") == 1
+
+
+def test_ctrl_backspace_of_the_next_word_only(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ok")
+    press(fake, fixer, fake.VK_BACK, fake.VK_CONTROL)        # removes "ok"
+    assert fixer.feedback.struck("teh") == 0
+    press(fake, fixer, fake.VK_BACK, fake.VK_CONTROL)        # now "the "
+    assert fixer.feedback.struck("teh") == 1
+
+
+def test_select_the_fixed_word_and_type_over_it(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    press(fake, fixer, fake.VK_LEFT, fake.VK_CONTROL, fake.VK_SHIFT)
+    type_text(fake, fixer, EN, "x")
+    assert fixer.feedback.struck("teh") == 1
+    assert len(fixer.word) == 1                              # "x" starts a new word
+
+
+def test_selecting_only_the_space_does_not_count(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    press(fake, fixer, fake.VK_LEFT, fake.VK_SHIFT)          # the space
+    press(fake, fixer, fake.VK_DELETE)
+    assert fixer.feedback.struck("teh") == 0
+
+
+def test_shift_left_into_the_word_then_delete(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    press(fake, fixer, fake.VK_LEFT, fake.VK_SHIFT)
+    press(fake, fixer, fake.VK_LEFT, fake.VK_SHIFT)          # space + "e"
+    press(fake, fixer, fake.VK_DELETE)
+    assert fixer.feedback.struck("teh") == 1
+
+
+def test_ctrl_z_right_after_a_fix(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    press(fake, fixer, fake.VK_Z, fake.VK_CONTROL)
+    assert fixer.feedback.struck("teh") == 1
+
+
+def test_ctrl_backspace_of_an_early_fix(env):
+    fake, fixer, done = env
+    fixer.early = True
+    type_text(fake, fixer, RU, "приве")
+    press(fake, fixer, fake.VK_BACK, fake.VK_CONTROL)
+    assert fixer.feedback.struck("ghbd") == 1

@@ -137,6 +137,7 @@ class Fixer:
         self.badge = True
         self.early_done = False     # the current word was already switched early
         self.watch = None           # the last automatic fix, watched for Backspace
+        self.sel = None             # while selecting backwards after a fix: how far back
         self.learner = Learner()
         self.feedback = Feedback()
         self._badge_seen = None
@@ -246,6 +247,61 @@ class Fixer:
                 self.detector.exceptions.add(word.lower())
             self.actions.put(lambda: add_exception(word))
         log.info("a %s fix was erased (strike %d)", kind, strikes)
+
+    def on_edit_key(self, vk):
+        """Other ways to throw a fix away: Ctrl+Backspace, Ctrl+Z, or selecting
+        back over it (Shift/Ctrl+Shift+Left, Shift+Home) and typing, Backspace
+        or Delete. Returns None for keys that are none of these."""
+        if w.key_down(w.VK_MENU) or w.key_down(w.VK_LWIN) or w.key_down(w.VK_RWIN):
+            return None
+        ctrl, shift = w.key_down(w.VK_CONTROL), w.key_down(w.VK_SHIFT)
+        watch = self.watch
+
+        if shift and vk in (w.VK_LEFT, w.VK_HOME) and watch:
+            d, k = self.sel or 0, len(self.word)
+            fixed_start = watch["after"] + len(watch["corr"].new_text)
+            if vk == w.VK_HOME:
+                d = fixed_start
+            elif ctrl:
+                d = k if d < k else max(d + 1, fixed_start)
+            else:
+                d += 1
+            self.sel = d
+            return False
+
+        if self.sel is not None:
+            selected, self.sel = self.sel, None
+            lay = self.layout_now()
+            types = lay is not None and (vk, False) in lay.table and not ctrl
+            if types or vk in (w.VK_BACK, w.VK_DELETE):
+                if watch and selected > watch["after"]:
+                    self.watch = None
+                    self.fix_erased(watch)
+                self.word, self.last_word, self.last_fix, self.watch = [], None, None, None
+                self.clear_marks()
+                return False if not types else None   # a letter starts a new word
+            return None
+
+        if ctrl and vk == w.VK_BACK:
+            if self.word:                   # deletes the word being typed
+                n = len(self.word)
+                self.word = []
+                self.shift_marks(-n)
+                self.watch_typed(-n)
+            else:                           # deletes the previous word
+                if watch and watch["after"] <= 1:
+                    self.watch = None
+                    self.fix_erased(watch)
+                self.watch = None
+                self.clear_marks()
+                self.learner.erased()
+            self.last_word = self.last_fix = None
+            return False
+
+        if ctrl and vk == w.VK_Z and not shift and watch and watch["after"] <= 1:
+            self.watch = None
+            self.fix_erased(watch)
+        return None
 
     def doubted(self, corr):
         """Was a fix of this word erased before? Then ask instead of fixing."""
@@ -395,6 +451,9 @@ class Fixer:
 
         if vk in MODIFIERS:
             return False
+        handled = self.on_edit_key(vk)
+        if handled is not None:
+            return handled
         if w.key_down(w.VK_CONTROL) or w.key_down(w.VK_MENU) \
                 or w.key_down(w.VK_LWIN) or w.key_down(w.VK_RWIN):
             self.reset()
