@@ -980,6 +980,17 @@ def main():
     os.makedirs(APP_DIR, exist_ok=True)
     logging.basicConfig(filename=os.path.join(APP_DIR, "log.txt"), level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
+    if "--update-now" in sys.argv:
+        # Same as the tray's Update item, without the tray: used by CI to test
+        # the real exe updating itself. Exit code 0 = new version started.
+        log.info("LayoutFixer %s: --update-now", updater.version.COMMIT[:7])
+        try:
+            release = updater.update()
+        except Exception:
+            log.exception("update failed")
+            sys.exit(1)
+        log.info("update result: %s", release and release.commit)
+        sys.exit(0 if release else 2)
     just_updated = "--updated" in sys.argv
     # Right after an update the old version may still be closing: wait for it.
     if not w.single_instance("Local\\LayoutFixer-single-instance",
