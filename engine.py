@@ -148,6 +148,11 @@ PREFIX_LENGTHS = (3, 4, 5, 6)
 # switched right away instead of waiting for the space.
 EARLY_LENGTHS = (4, 5, 6)
 EARLY_MIN_ZIPF = 4.0
+# Earlier words of the same line, typed in the same wrong layout but left alone
+# (too short or ambiguous on their own), are converted together with a fixed
+# word if they are words in the new language, unless they are clearly more
+# common as typed.
+CONTEXT_BONUS = 0.0
 EARLY_RIVAL = 1.5         # another layout this close: too early to tell, wait for the space
 
 # Decision thresholds, tuned with tools/evaluate.py.
@@ -244,6 +249,25 @@ class Detector:
 
     def is_word(self, lang, word):
         return self.score(lang, word) is not None
+
+    def convert_earlier(self, keys, source, target):
+        """The earlier word `keys`, typed in `source`, retyped in `target` if the
+        line has just turned out to be in the target language. None to keep it."""
+        old, new = source.type_keys(keys), target.type_keys(keys)
+        if not old or not new or old == new or any(c.isdigit() for c in old):
+            return None
+        _, old_core, _ = _split_core(old)
+        new_pre, new_core, _ = _split_core(new)
+        if new_pre or len(new_core) < len(old_core) or normalize(old) in self.exceptions \
+                or normalize(old_core) in self.exceptions:
+            return None
+        zt = self.score(target.lang, new_core)
+        if zt is None:
+            return None
+        zs = self.score(source.lang, old_core) if old_core else None
+        if zs is not None and zs > zt + CONTEXT_BONUS:
+            return None
+        return new
 
     def decide_early(self, keys, current, layouts, prefer=None):
         """Wrong layout noticed in the middle of a word (after 4-6 letters)?

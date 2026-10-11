@@ -47,6 +47,7 @@ jobs:
       - name: Early fix quality
         run: python tools/evaluate_early.py 3000
 
+<<<<<<< HEAD
       - name: Build an "old" exe for the self-update test
         shell: bash
         run: |
@@ -76,6 +77,10 @@ jobs:
           if ("sha256:$hash" -ne $asset.digest) { throw "exe was not replaced by the release" }
           if (-not $running) { throw "the new version did not start" }
           if (Test-Path "$d\LayoutFixer.old.exe") { throw "old exe was not removed" }
+=======
+      - name: Line context quality
+        run: python tools/evaluate_context.py 1500
+>>>>>>> main
 
       - name: Stamp version
         shell: bash

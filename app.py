@@ -111,6 +111,7 @@ def set_autostart(enabled):
 # ---------------------------------------------------------------- core
 
 MAX_MARKS = 5
+LINE_WORDS = 10         # earlier words of the line kept for fixing together
 WATCH_SECONDS = 30      # Backspace into a fix this soon after it means "that was wrong"
 WATCH_CHARS = 40
 STRIKES_TO_STOP = 2     # erased this many times: never fix the word again
@@ -138,6 +139,8 @@ class Fixer:
         self.early_done = False     # the current word was already switched early
         self.watch = None           # the last automatic fix, watched for Backspace
         self.sel = None             # while selecting backwards after a fix: how far back
+        self.line = []              # earlier words of this line: {keys, lay, text, fixed}
+        self.finished = None        # the word check_word just finished, for self.line
         self.learner = Learner()
         self.feedback = Feedback()
         self._badge_seen = None
@@ -210,7 +213,46 @@ class Fixer:
         self.last_word = None
         self.last_fix = None
         self.watch = None
+        self.line = []
         self.clear_marks()
+
+    # --- earlier words of the line
+
+    def with_earlier(self, corr, source):
+        """A word moved from `source` to another layout: convert the words
+        before it on this line that were typed in the same layout and left
+        alone, if they make sense in the new language. Returns the correction
+        widened over them (or the same one)."""
+        if corr.target_lang == corr.source_lang or self.detector is None:
+            return corr
+        target = self.by_lang[corr.target_lang]
+        start, news = len(self.line), []
+        for i in range(len(self.line) - 1, -1, -1):
+            word = self.line[i]
+            if word["fixed"] or word["lay"] is not source:
+                break
+            new = self.detector.convert_earlier(word["keys"], source, target)
+            if new is None:
+                break
+            start, news = i, [new] + news
+        if not news:
+            return corr
+        olds = [w["text"] for w in self.line[start:]]
+        for word, new in zip(self.line[start:], news):
+            word.update(lay=target, text=new, fixed=True)
+        self.clear_marks()
+        log.info("also converted %d earlier word(s)", len(news))
+        return Correction(corr.source_lang, corr.target_lang,
+                          " ".join(olds + [corr.old_text]), " ".join(news + [corr.new_text]),
+                          caps=corr.caps)
+
+    def remember_word(self, vk):
+        """After a boundary: keep the finished word for the line, or start a new line."""
+        if vk != w.VK_SPACE or self.finished is None:
+            self.line = []
+        else:
+            self.line = (self.line + [self.finished])[-LINE_WORDS:]
+        self.finished = None
 
     # --- was an automatic fix wrong? (Backspace into it)
 
@@ -278,6 +320,7 @@ class Fixer:
                     self.watch = None
                     self.fix_erased(watch)
                 self.word, self.last_word, self.last_fix, self.watch = [], None, None, None
+                self.line = []
                 self.clear_marks()
                 return False if not types else None   # a letter starts a new word
             return None
@@ -289,6 +332,7 @@ class Fixer:
                 self.shift_marks(-n)
                 self.watch_typed(-n)
             else:                           # deletes the previous word
+                self.line = []
                 if watch and watch["after"] <= 1:
                     self.watch = None
                     self.fix_erased(watch)
@@ -468,6 +512,7 @@ class Fixer:
                 self.last_word = None
                 self.last_fix = None
                 self.learner.erased()
+                self.line = []
             self.shift_marks(-1)
             self.watch_typed(-1)
             return False
@@ -507,20 +552,23 @@ class Fixer:
         if corr is None or self.doubted(corr):
             return False
         self.early_done = True
+        single, corr = corr, self.with_earlier(corr, lay)
         target = self.by_lang[corr.target_lang]
         self.prev_lang = corr.target_lang
         saved = self.stats.record("early", corr.old_text, corr.new_text,
                                   corr.source_lang, corr.target_lang)
         self.actions.put(self.stats.save)
         self.last_fix = (corr, list(self.word), None, "early", saved)
-        self.start_watch(corr, "early", saved, 0)
+        self.start_watch(single, "early", saved, 0)
         erase = len(corr.old_text) - 1     # the last key never reached the app
         self.actions.put(lambda: self.replace(erase, corr.new_text, target.hkl, None))
         log.info("early fix %r -> %r", corr.old_text, corr.new_text)
         return True
 
     def on_boundary(self, vk):
+        self.finished = None
         swallowed = self.check_word(vk)
+        self.remember_word(vk)
         if vk == w.VK_SPACE:
             self.shift_marks(1)
             self.watch_typed(1)
@@ -577,14 +625,17 @@ class Fixer:
         if res and res.auto and self.feedback.struck(res.old_text):
             res = SpellResult(False, res.old_text, res.suggestions)
         if corr:
+            word_text, single = corr.new_text, corr
+            corr = self.with_earlier(corr, lay)
             target = self.by_lang[corr.target_lang]
+            self.finished = {"keys": keys, "lay": target, "text": word_text, "fixed": True}
             self.prev_lang = corr.target_lang
             kind = "layout" if corr.target_lang != corr.source_lang else "caps"
             saved = self.stats.record(kind, corr.old_text, corr.new_text,
                                       corr.source_lang, corr.target_lang)
             self.actions.put(self.stats.save)
             self.last_fix = (corr, keys, vk, kind, saved)
-            self.start_watch(corr, kind, saved, 0)
+            self.start_watch(single, kind, saved, 0)
             self.last_word = None
             self.actions.put(lambda: self.replace(len(corr.old_text), corr.new_text,
                                                   target.hkl, vk, toggle_caps=corr.caps))
@@ -597,6 +648,7 @@ class Fixer:
             saved = self.stats.record("spell", corr.old_text, corr.new_text, lay.lang, lay.lang)
             self.actions.put(self.stats.save)
             self.last_fix = (corr, keys, vk, "spell", saved)
+            self.finished = {"keys": keys, "lay": lay, "text": corr.new_text, "fixed": True}
             self.start_watch(corr, "spell", saved, 0)
             self.last_word = None
             self.prev_lang = lay.lang
@@ -609,6 +661,8 @@ class Fixer:
             self.add_mark(res, lay.lang)
         if self.learn and vk == w.VK_SPACE and self.detector is not None:
             self.maybe_learn(lay, keys)
+        self.finished = {"keys": keys, "lay": lay, "text": lay.type_keys(keys) or "",
+                         "fixed": bool(res)}
         self.prev_lang = lay.lang
         self.last_word = (keys, lay, vk)
         return False
@@ -635,8 +689,10 @@ class Fixer:
             source = self.by_lang.get(corr.source_lang)
             if source is None:
                 return
+            # A fix may cover earlier words of the line too; the lesson is about
+            # the word that triggered it, the last one.
             self.feedback.undo(kind, corr.source_lang, corr.target_lang,
-                               corr.old_text, corr.new_text)
+                               corr.old_text.split()[-1], corr.new_text.split()[-1])
             self.actions.put(self.feedback.save)
             typed_boundary = vk not in (None, w.VK_RETURN)
             erase = len(corr.new_text) + (1 if typed_boundary else 0)
@@ -648,11 +704,16 @@ class Fixer:
             if corr.caps and corr.source_lang == corr.target_lang:
                 log.info("undo caps fix of %r", corr.old_text)
                 return      # only the case changed: nothing to learn
-            word = corr.old_text.strip()
+            word = corr.old_text.split()[-1]
+            self.line = []
             if self.detector:
                 self.detector.exceptions.add(word.lower())
             self.actions.put(lambda: add_exception(word))
             log.info("undo %r, added to exceptions", word)
+            return
+
+        if w.key_down(w.VK_SHIFT):
+            self.convert_line()
             return
 
         if self.word:
@@ -676,6 +737,41 @@ class Fixer:
         self.stats.record("manual", old, new, lay.lang, target.lang)
         self.actions.put(self.stats.save)
         self.actions.put(lambda: self.replace(len(old) + extra, new, target.hkl, vk))
+
+    def convert_line(self):
+        """Shift+Pause: the last words of the line (and the word being typed)
+        go to the next layout together, e.g. a whole phrase typed in the
+        wrong layout that nothing fixed."""
+        source = self.layout_now()
+        if source is None:
+            return
+        words = []
+        for word in reversed(self.line):
+            if word["lay"] is not source:
+                break
+            words.insert(0, word)
+        if not words and not self.word:
+            return
+        target = self.next_layout(source)
+        olds = [x["text"] for x in words]
+        news = [target.type_keys(x["keys"]) or x["text"] for x in words]
+        if self.word:
+            olds.append(source.type_keys(self.word) or "")
+            news.append(target.type_keys(self.word) or "")
+            tail = ""
+        else:
+            tail = " "                       # the space after the last word
+        old, new = " ".join(olds) + tail, " ".join(news) + tail
+        for x, n in zip(words, news):
+            x.update(lay=target, text=n)
+        self.prev_lang = target.lang
+        self.last_word = None
+        self.clear_marks()
+        self.stats.record("manual", old, new, source.lang, target.lang)
+        self.actions.put(self.stats.save)
+        self.last_fix = (Correction(source.lang, target.lang, old.rstrip(), new.rstrip()),
+                         list(self.word), w.VK_SPACE if tail else None, "manual", 0)
+        self.actions.put(lambda: self.replace(len(old), new, target.hkl, None))
 
     def next_layout(self, lay):
         order = list(self.by_lang.values())
