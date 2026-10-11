@@ -166,10 +166,21 @@ def check_notepad():
 def check_overlay():
     from overlay import Mark, Overlay
     ov = Overlay(lambda *a: None, lambda *a: None, w.cursor_pos, w.make_tool_window)
+    assert ov.ready.wait(20), "overlay did not start"
+    assert ov.error is None, ov.error
     ov.show(Mark(1, "სახლსი", ["სახლში", "სახლის"], 300, 300, 316, 360))
-    time.sleep(1.0)
+    for _ in range(50):
+        if ov.contains(305, 318):
+            break
+        time.sleep(0.1)
     assert ov.contains(305, 318), "mark window not registered"
-    print("overlay: mark shown")
+    # Hovering over the word opens the popup with the suggestions.
+    w.user32.SetCursorPos(320, 308)
+    for _ in range(30):
+        if ov.contains(300, 280):       # the popup sits above the word
+            break
+        time.sleep(0.1)
+    print(f"overlay: mark shown, popup open on hover: {ov.contains(300, 280)}")
 
 
 if __name__ == "__main__":

@@ -8,9 +8,11 @@ the word opens a popup above it with up to two suggestions and the word itself:
 clicking a suggestion replaces the word, clicking the word keeps it.
 """
 
+import logging
 import queue
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 
 MARK_COLOR = "#e53935"
@@ -50,6 +52,8 @@ class Overlay:
         self._cmds = queue.Queue()
         self._boxes = []               # screen boxes of our windows, for the mouse hook
         self._lock = threading.Lock()
+        self.ready = threading.Event()  # set once Tk runs (or failed: see .error)
+        self.error = None
         threading.Thread(target=self._run, daemon=True, name="overlay").start()
 
     # --- any thread
@@ -71,15 +75,21 @@ class Overlay:
     # --- Tk thread
 
     def _run(self):
-        import tkinter as tk
-        self.tk = tk
-        self.root = tk.Tk()
-        self.root.withdraw()
-        self.marks = {}         # id -> (Mark, Toplevel)
-        self.popup = None       # (mark_id, Toplevel, box)
-        self.away_since = None
-        self.root.after(40, self._tick)
-        self.root.mainloop()
+        try:
+            import tkinter as tk
+            self.tk = tk
+            self.root = tk.Tk()
+            self.root.withdraw()
+            self.marks = {}         # id -> (Mark, Toplevel)
+            self.popup = None       # (mark_id, Toplevel, box)
+            self.away_since = None
+            self.root.after(40, self._tick)
+            self.ready.set()
+            self.root.mainloop()
+        except Exception:
+            self.error = traceback.format_exc()
+            logging.getLogger("LayoutFixer").error("overlay stopped:\n%s", self.error)
+            self.ready.set()
 
     def _window(self):
         win = self.tk.Toplevel(self.root)
@@ -96,7 +106,10 @@ class Overlay:
         try:
             while True:
                 cmd, arg = self._cmds.get_nowait()
-                getattr(self, "_do_" + cmd)(arg)
+                try:
+                    getattr(self, "_do_" + cmd)(arg)
+                except Exception:
+                    logging.getLogger("LayoutFixer").exception("overlay %s failed", cmd)
         except queue.Empty:
             pass
         now = time.monotonic()
