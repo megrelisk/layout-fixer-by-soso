@@ -18,6 +18,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +59,9 @@ jobs:
           $d = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\upd"
           Copy-Item dist\LayoutFixerOld.exe "$d\LayoutFixer.exe"
           $log = "$env:APPDATA\LayoutFixer\log.txt"
-          $p = Start-Process "$d\LayoutFixer.exe" -ArgumentList "--update-now" -Wait -PassThru
+          # -Wait would also wait for the new version it starts, which keeps running.
+          $p = Start-Process "$d\LayoutFixer.exe" -ArgumentList "--update-now" -PassThru
+          if (-not $p.WaitForExit(180000)) { Stop-Process $p -Force; throw "--update-now hung" }
           "exit code: $($p.ExitCode)"
           Start-Sleep 20
           if (Test-Path $log) { Get-Content $log -Tail 40 }
