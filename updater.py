@@ -10,6 +10,11 @@ the digest GitHub reports, and swaps it in:
     start LayoutFixer.exe --updated, then exit
 
 The new process waits for the old one to quit and deletes LayoutFixer.old.exe.
+
+The version is read from version.json, published next to the exe, through
+GitHub's plain "latest release" download links. Those are not rate limited.
+GitHub's API allows 60 requests an hour per internet address, and providers
+often put many customers behind one address, so the API is only a fallback.
 """
 
 import hashlib
@@ -24,9 +29,11 @@ from dataclasses import dataclass
 import version
 
 REPO = "megrelisk/layout-fixer-by-soso"
+LATEST = f"https://github.com/{REPO}/releases/latest/download/"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET = "LayoutFixer.exe"
 TIMEOUT = 30
+REPLACE_TRIES = 20          # an antivirus may hold the new file for a few seconds
 
 
 class UpdateError(Exception):
@@ -61,16 +68,31 @@ def parse_release(data):
     raise UpdateError("no_exe")
 
 
+def _get_json(url, opener, headers=None):
+    req = urllib.request.Request(url, headers={"User-Agent": "LayoutFixer", **(headers or {})})
+    with opener(req, timeout=TIMEOUT) as resp:
+        return json.load(resp)
+
+
 def fetch_release(opener=urllib.request.urlopen):
-    req = urllib.request.Request(API, headers={"Accept": "application/vnd.github+json",
-                                               "User-Agent": "LayoutFixer"})
+    """The latest release: from version.json, or from the API if that is missing."""
+    errors = []
     try:
-        with opener(req, timeout=TIMEOUT) as resp:
-            return parse_release(json.load(resp))
+        data = _get_json(LATEST + "version.json", opener)
+        return Release(commit=data["commit"], url=LATEST + ASSET, size=int(data["size"]),
+                       sha256=data["sha256"], published=data.get("built", ""))
+    except Exception as e:
+        errors.append(f"version.json: {e}")
+    headers = {"Accept": "application/vnd.github+json"}
+    if os.environ.get("GITHUB_TOKEN"):          # CI only
+        headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
+    try:
+        return parse_release(_get_json(API, opener, headers))
     except UpdateError:
         raise
     except Exception as e:
-        raise UpdateError("network", str(e)) from e
+        errors.append(f"api: {e}")
+        raise UpdateError("network", "; ".join(errors)) from e
 
 
 def is_newer(release):
@@ -122,17 +144,49 @@ def paths(exe):
     return base + ".new.exe", base + ".old.exe"
 
 
-def install(new_exe, exe, launch=subprocess.Popen):
+def _replace(src, dst, tries=REPLACE_TRIES, delay=0.5):
+    for attempt in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(delay)
+
+
+def start_detached(args):
+    """Start the new version on its own.
+
+    PYINSTALLER_RESET_ENVIRONMENT: without it a one-file exe started by
+    another one-file exe would reuse the parent's unpacked files, which are
+    deleted as soon as the parent quits. No console handles: the app has none."""
+    env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+    flags = 0x00000008 | 0x00000200     # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen(args, env=env, close_fds=True, creationflags=flags,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+
+def install(new_exe, exe, launch=start_detached):
     """Put new_exe in place of the running exe and start it."""
     _, old_exe = paths(exe)
     _remove(old_exe)
-    os.replace(exe, old_exe)            # allowed while exe is running
     try:
-        os.replace(new_exe, exe)
-    except OSError:
+        _replace(exe, old_exe)          # allowed while exe is running
+    except PermissionError as e:
+        raise UpdateError("access", os.path.dirname(exe)) from e
+    try:
+        _replace(new_exe, exe)
+    except OSError as e:
         os.replace(old_exe, exe)        # put the working version back
+        raise UpdateError("access", str(e)) from e
+    try:
+        launch([exe, "--updated"])
+    except OSError:
+        os.replace(exe, new_exe)        # could not start it: back to the old one
+        os.replace(old_exe, exe)
         raise
-    launch([exe, "--updated"], close_fds=True)
 
 
 def cleanup_after_update(exe, attempts=20, delay=0.5):
@@ -158,6 +212,8 @@ def update(progress=None):
         return None
     exe = sys.executable
     new_exe, _ = paths(exe)
+    if not os.access(os.path.dirname(exe), os.W_OK):
+        raise UpdateError("access", os.path.dirname(exe))
     download(release, new_exe, progress=progress)
     install(new_exe, exe)
     return release

@@ -108,6 +108,12 @@ TEXTS = {
     "update.err.size": {"ka": "ფაილი ბოლომდე ვერ ჩამოიტვირთა ({detail})",
                         "en": "the file did not download completely ({detail})",
                         "ru": "файл скачался не полностью ({detail})"},
+    "update.err.access": {"ka": "საქაღალდეში ჩაწერა არ არის ნებადართული ({detail}). "
+                                "გადაიტანეთ LayoutFixer.exe, მაგალითად, C:\\Programs\\LayoutFixer-ში",
+                          "en": "no permission to write to the folder ({detail}). "
+                                "Move LayoutFixer.exe, e.g. to C:\\Programs\\LayoutFixer",
+                          "ru": "нет прав на запись в папку ({detail}). "
+                                "Перенесите LayoutFixer.exe, например в C:\\Programs\\LayoutFixer"},
     "update.err.hash": {"ka": "საკონტროლო ჯამი არ ემთხვევა, ფაილი დაზიანებულია",
                         "en": "checksum mismatch, the file is damaged",
                         "ru": "контрольная сумма не совпала, файл повреждён"},
