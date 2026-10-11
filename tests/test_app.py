@@ -14,6 +14,7 @@ class FakeWin(types.ModuleType):
     VK_BACK, VK_TAB, VK_RETURN, VK_SHIFT = 0x08, 0x09, 0x0D, 0x10
     VK_CONTROL, VK_MENU, VK_PAUSE, VK_CAPITAL = 0x11, 0x12, 0x13, 0x14
     VK_SPACE, VK_LWIN, VK_RWIN = 0x20, 0x5B, 0x5C
+    VK_LEFT, VK_RIGHT = 0x25, 0x27
 
     def __init__(self):
         super().__init__("winapi")
@@ -21,6 +22,21 @@ class FakeWin(types.ModuleType):
         self.held = set()
         self.caps = False
         self.switched = []
+        self.sent = []
+        self.caret_x = 100
+
+    def caret_rect_fast(self):
+        self.caret_x += 8
+        return self.caret_x, 200, 216
+
+    def vk_press(self, vk, count=1):
+        return [("vk", vk)] * count
+
+    def unicode_text(self, text):
+        return [("text", text)]
+
+    def send_inputs(self, inputs):
+        self.sent.append(inputs)
 
     def foreground_window(self):
         return 1
@@ -211,3 +227,119 @@ def test_stats_count_fixes_and_undo(env):
     fixer.on_key(fake.VK_PAUSE)          # undo the caps fix
     t2 = fixer.stats.totals()
     assert t2["caps"] == 0 and t2["undo"] == 1 and t2["seconds"] < t["seconds"]
+
+
+class FakeOverlay:
+    def __init__(self):
+        self.shown, self.removed, self.cleared = [], [], 0
+
+    def show(self, mark):
+        self.shown.append(mark)
+
+    def remove(self, mark_id):
+        self.removed.append(mark_id)
+
+    def clear(self):
+        self.cleared += 1
+
+    def contains(self, x, y):
+        return False
+
+
+@pytest.fixture
+def spell_env(env, detector):
+    from spell import Speller
+    fake, fixer, done = env
+    fixer.speller = Speller(detector)
+    fixer.overlay = FakeOverlay()
+    return fake, fixer, done
+
+
+def test_georgian_shift_slip_is_fixed(spell_env):
+    fake, fixer, done = spell_env
+    fake.layout = HKL[KA]
+    assert type_text(fake, fixer, KA, "ტბილისი ")[-1] is True
+    run_actions(fixer)
+    assert done == [(7, "თბილისი", HKL[KA], fake.VK_SPACE)]
+    assert fixer.stats.totals()["spell"] == 1
+
+
+def test_swapped_letters_are_fixed(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    run_actions(fixer)
+    assert done == [(3, "the", HKL[EN], fake.VK_SPACE)]
+
+
+def test_pause_undoes_spelling_fix_and_remembers(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, EN, "teh ")
+    fixer.on_key(fake.VK_PAUSE)
+    run_actions(fixer)
+    assert done[-1] == (4, "teh", HKL[EN], fake.VK_SPACE)
+    assert "teh" in fixer.detector.exceptions
+    fixer.detector.exceptions.discard("teh")
+
+
+def test_doubtful_word_gets_a_mark_and_text_passes(spell_env):
+    fake, fixer, done = spell_env
+    fake.layout = HKL[KA]
+    swallowed = type_text(fake, fixer, KA, "სახლსი ")
+    run_actions(fixer)
+    assert not any(swallowed) and done == []
+    (mark,) = fixer.overlay.shown
+    assert mark.word == "სახლსი" and "სახლში" in mark.suggestions
+    assert mark.x < mark.end_x            # first letter left of the word end
+
+
+def test_picking_a_suggestion_replaces_the_word_behind_the_caret(spell_env):
+    fake, fixer, done = spell_env
+    fake.layout = HKL[KA]
+    type_text(fake, fixer, KA, "სახლსი და")   # mark, then 3 more characters
+    mark = fixer.overlay.shown[0]
+    fixer.pick_suggestion(mark.id, "სახლში")
+    run_actions(fixer)
+    left, back, right = ("vk", fake.VK_LEFT), ("vk", fake.VK_BACK), ("vk", fake.VK_RIGHT)
+    assert fake.sent == [[left] * 3 + [back] * 6 + [("text", "სახლში")] + [right] * 3]
+    assert fixer.marks == {}
+    assert fixer.stats.totals()["suggest"] == 1
+
+
+def test_keeping_the_word_remembers_it(spell_env):
+    fake, fixer, done = spell_env
+    fake.layout = HKL[KA]
+    type_text(fake, fixer, KA, "სახლსი ")
+    fixer.keep_word(fixer.overlay.shown[0].id)
+    assert fixer.marks == {} and "სახლსი" in fixer.detector.exceptions
+    fixer.detector.exceptions.discard("სახლსი")
+
+
+def test_backspace_into_the_marked_word_drops_the_mark(spell_env):
+    fake, fixer, done = spell_env
+    fake.layout = HKL[KA]
+    type_text(fake, fixer, KA, "სახლსი ა")
+    fixer.on_key(fake.VK_BACK)            # the "ა"
+    assert fixer.marks
+    fixer.on_key(fake.VK_BACK)            # the space: caret is at the word again
+    assert fixer.marks == {}
+
+
+def test_enter_and_clicks_clear_marks(spell_env):
+    fake, fixer, done = spell_env
+    fake.layout = HKL[KA]
+    type_text(fake, fixer, KA, "სახლსი ")
+    fixer.on_key(fake.VK_RETURN)
+    assert fixer.marks == {}
+    type_text(fake, fixer, KA, "სახლსი ")
+    fixer.on_click()
+    assert fixer.marks == {}
+
+
+def test_earlier_marks_follow_a_replacement(spell_env):
+    fake, fixer, done = spell_env
+    fake.layout = HKL[KA]
+    type_text(fake, fixer, KA, "სახლსი სახლსი ")
+    first, second = fixer.overlay.shown
+    fixer.pick_suggestion(second.id, "სახლში")
+    run_actions(fixer)
+    assert fixer.marks[first.id].after == 8   # " სახლში " after it, same length

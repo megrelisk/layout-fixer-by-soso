@@ -4,11 +4,15 @@
   detector sees the same characters Windows types;
 - SendInput accepts our Unicode input structures;
 - the keyboard hook can be installed;
-- inside the hook, Caps Lock state is seen correctly after it is toggled.
+- inside the hook, Caps Lock state is seen correctly after it is toggled;
+- in Notepad: the caret position can be read, and a word behind the caret can
+  be replaced the way a picked suggestion is (Left, Backspace, text, Right);
+- the overlay can show a mark and a popup.
 """
 
 import ctypes
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -105,9 +109,75 @@ def check_caps_in_hook():
     assert seen == [not before, before], "Caps Lock state inside the hook is stale"
 
 
+def notepad_text():
+    hwnd = w.user32.GetForegroundWindow()
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(child, _):
+        name = ctypes.create_unicode_buffer(64)
+        w.user32.GetClassNameW(child, name, 64)
+        if name.value in ("Edit", "RichEditD2DPT"):
+            found.append(child)
+        return True
+
+    w.user32.EnumChildWindows(hwnd, each, 0)
+    if not found:
+        return None
+    buf = ctypes.create_unicode_buffer(1000)
+    w.user32.SendMessageW(found[0], 0x000D, 1000, buf)   # WM_GETTEXT
+    return buf.value.replace("\r", "")
+
+
+def check_notepad():
+    proc = subprocess.Popen(["notepad.exe"])
+    try:
+        time.sleep(3)
+        w.com_init()
+        rects = []
+        for text in ("abc ", "სახლსი და"):
+            w.send_inputs(w.unicode_text(text))
+            time.sleep(0.5)
+            rects.append((w.caret_rect_fast(), w.caret_rect_accessible()))
+        print(f"caret after 'abc ': fast={rects[0][0]} accessible={rects[0][1]}")
+        print(f"caret later:        fast={rects[1][0]} accessible={rects[1][1]}")
+        moved = [a and b and b[0] > a[0] for a, b in zip(rects[0], rects[1])]
+        if not any(moved):
+            print("WARNING: no caret position on this machine (no interactive desktop?)")
+        before = notepad_text()
+        # Pick a suggestion for "სახლსი" with 3 characters typed after it.
+        w.send_inputs(w.vk_press(w.VK_LEFT, 3) + w.vk_press(w.VK_BACK, 6)
+                      + w.unicode_text("სახლში") + w.vk_press(w.VK_RIGHT, 3))
+        time.sleep(0.5)
+        w.send_inputs(w.unicode_text("!"))
+        time.sleep(0.5)
+        after = notepad_text()
+        print(f"notepad text: {before!r} -> {after!r}")
+        if before is None:
+            print("WARNING: could not read Notepad's text, replacement not checked")
+        elif before == "abc სახლსი და":
+            assert after == "abc სახლში და!", "replacing the word behind the caret failed"
+        else:
+            print("WARNING: typing did not reach Notepad, replacement not checked")
+    finally:
+        proc.kill()
+
+
+def check_overlay():
+    from overlay import Mark, Overlay
+    ov = Overlay(lambda *a: None, lambda *a: None, w.cursor_pos, w.make_tool_window)
+    ov.show(Mark(1, "სახლსი", ["სახლში", "სახლის"], 300, 300, 316, 360))
+    time.sleep(1.0)
+    assert ov.contains(305, 318), "mark window not registered"
+    print("overlay: mark shown")
+
+
 if __name__ == "__main__":
     check_tables()
     check_send_input()
     check_hook()
     check_caps_in_hook()
+    w.set_dpi_aware()
+    check_notepad()
+    check_overlay()
     print("windows smoke test passed")

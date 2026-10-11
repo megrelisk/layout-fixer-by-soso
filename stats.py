@@ -20,7 +20,7 @@ CAPS_KEY = 0.5          # finding and pressing Caps Lock
 PAUSE_KEY = 0.5         # pressing Pause/Break for a manual conversion
 DEFAULT_KEY_INTERVAL = 0.25  # ~240 characters per minute until we measure
 
-KINDS = ("layout", "caps", "manual")
+KINDS = ("layout", "caps", "manual", "spell", "suggest")
 TOP_WORDS = 300
 
 
@@ -30,6 +30,11 @@ def seconds_saved(kind, old, new, key_interval):
     retype = (len(new) + 1) * key_interval
     if kind == "caps":
         return NOTICE + erase + CAPS_KEY + retype
+    if kind == "spell":
+        return NOTICE + erase + retype
+    if kind == "suggest":
+        # Clicking the suggestion replaced finding the word and retyping it.
+        return erase + retype
     if kind == "manual":
         # The user noticed it anyway and pressed Pause instead of retyping.
         return max(0.0, erase + SWITCH_LAYOUT + retype - PAUSE_KEY)
@@ -82,7 +87,7 @@ class Stats:
         saved = seconds_saved(kind, old, new, self.key_interval)
         with self._lock:
             day = self._day()
-            day[kind] += 1
+            day[kind] = day.get(kind, 0) + 1
             day["seconds"] += saved
             if source and target and source != target:
                 self.pairs[f"{source}->{target}"] += 1
@@ -95,8 +100,8 @@ class Stats:
         """The user undid a correction: it saved nothing after all."""
         with self._lock:
             day = self._day()
-            day["undo"] += 1
-            if day[kind] > 0:
+            day["undo"] = day.get("undo", 0) + 1
+            if day.get(kind, 0) > 0:
                 day[kind] -= 1
             day["seconds"] = max(0.0, day["seconds"] - saved)
             if kind != "caps" and self.words[new.strip()] > 0:
@@ -132,11 +137,13 @@ class Stats:
         lines = []
         for title, since in periods:
             t = self.totals(since)
-            fixes = t["layout"] + t["caps"] + t["manual"]
+            fixes = sum(t[k] for k in KINDS)
             lines.append(f"{title}: {fixes} исправл., сэкономлено {format_duration(t['seconds'])}")
             if since is None:
                 lines.append(f"    раскладка {t['layout']}, Caps Lock {t['caps']}, "
                              f"вручную (Pause) {t['manual']}, отменено {t['undo']}")
+                lines.append(f"    опечатки: исправлено сразу {t['spell']}, "
+                             f"выбрано из подсказок {t['suggest']}")
         names = {"en": "EN", "ru": "RU", "ka": "KA"}
         if self.pairs:
             lines.append("")

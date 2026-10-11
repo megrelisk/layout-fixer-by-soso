@@ -40,10 +40,13 @@ jobs:
       - name: Detection quality
         run: python tools/evaluate.py 3000
 
+      - name: Spelling quality
+        run: python tools/evaluate_spell.py 3000
+
       - name: Build LayoutFixer.exe
         run: >
           pyinstaller --noconfirm --onefile --noconsole --name LayoutFixer
-          --add-data "dicts;dicts" --hidden-import pystray._win32 app.py
+          --add-data "dicts;dicts" --hidden-import pystray._win32 --hidden-import tkinter app.py
 
       - uses: actions/upload-artifact@v4
         with:

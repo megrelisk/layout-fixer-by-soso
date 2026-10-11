@@ -30,6 +30,8 @@ VK_MENU = 0x12
 VK_PAUSE = 0x13
 VK_CAPITAL = 0x14
 VK_SPACE = 0x20
+VK_LEFT = 0x25
+VK_RIGHT = 0x27
 VK_LWIN = 0x5B
 VK_RWIN = 0x5C
 
@@ -42,6 +44,16 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
         ("vkCode", wintypes.DWORD),
         ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", wintypes.POINT),
+        ("mouseData", wintypes.DWORD),
         ("flags", wintypes.DWORD),
         ("time", wintypes.DWORD),
         ("dwExtraInfo", ULONG_PTR),
@@ -236,3 +248,119 @@ def caps_on():
 def single_instance(name):
     handle = kernel32.CreateMutexW(None, False, name)
     return handle and ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+
+
+# ---------------------------------------------------------------- screen helpers
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+
+class VARIANT(ctypes.Structure):
+    # Only VT_I4 is used (CHILDID_SELF); sized like the real 24-byte x64 VARIANT.
+    _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                ("r3", ctypes.c_ushort), ("lVal", ctypes.c_long), ("pad1", ctypes.c_long),
+                ("pad2", ctypes.c_longlong)]
+
+
+IID_IAccessible = GUID(0x618736E0, 0x3C3D, 0x11CF,
+                       (ctypes.c_ubyte * 8)(0x81, 0x0C, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71))
+OBJID_CARET = 0xFFFFFFF8
+VT_I4 = 3
+
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p]
+user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.GetParent.argtypes = [wintypes.HWND]
+user32.GetParent.restype = wintypes.HWND
+user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+
+_ole32 = ctypes.WinDLL("ole32")
+_oleacc = ctypes.WinDLL("oleacc")
+_oleacc.AccessibleObjectFromWindow.argtypes = [
+    wintypes.HWND, wintypes.DWORD, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+_ACC_LOCATION = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_long), ctypes.POINTER(ctypes.c_long),
+    ctypes.POINTER(ctypes.c_long), ctypes.POINTER(ctypes.c_long), VARIANT)
+_RELEASE = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+
+
+def set_dpi_aware():
+    """Use real pixels everywhere, so caret, cursor and our windows agree."""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor
+    except Exception:
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def cursor_pos():
+    pt = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
+
+def caret_rect_fast():
+    """(x, top, bottom) of the text caret in screen pixels, from the system caret.
+
+    Cheap enough for the keyboard hook. Works in classic Windows apps (Notepad,
+    Word, most editors); returns None where the app draws its own caret.
+    """
+    info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    if not user32.GetGUIThreadInfo(foreground_thread(), ctypes.byref(info)):
+        return None
+    rc = info.rcCaret
+    if not info.hwndCaret or rc.bottom <= rc.top:
+        return None
+    pt = wintypes.POINT(rc.left, rc.top)
+    user32.ClientToScreen(info.hwndCaret, ctypes.byref(pt))
+    return pt.x, pt.y, pt.y + (rc.bottom - rc.top)
+
+
+def caret_rect_accessible():
+    """Caret position through accessibility (MSAA), for Chrome, Electron and co.
+
+    Slower and cross-process: call it outside the keyboard hook. The calling
+    thread must have COM initialised (com_init).
+    """
+    ptr = ctypes.c_void_p()
+    hr = _oleacc.AccessibleObjectFromWindow(focus_window(), OBJID_CARET,
+                                            ctypes.byref(IID_IAccessible), ctypes.byref(ptr))
+    if hr != 0 or not ptr.value:
+        return None
+    vtbl = ctypes.cast(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0],
+                       ctypes.POINTER(ctypes.c_void_p))
+    try:
+        loc = _ACC_LOCATION(vtbl[22])
+        x, y, cx, cy = (ctypes.c_long() for _ in range(4))
+        child = VARIANT(vt=VT_I4, lVal=0)
+        hr = loc(ptr, ctypes.byref(x), ctypes.byref(y), ctypes.byref(cx), ctypes.byref(cy), child)
+        if hr != 0 or cy.value <= 0 or (x.value == 0 and y.value == 0):
+            return None
+        return x.value, y.value, y.value + cy.value
+    finally:
+        _RELEASE(vtbl[2])(ptr)
+
+
+def caret_rect():
+    return caret_rect_fast() or caret_rect_accessible()
+
+
+def com_init():
+    _ole32.CoInitializeEx(None, 2)   # COINIT_APARTMENTTHREADED
+
+
+def make_tool_window(hwnd):
+    """Topmost, no taskbar button, and clicking it never takes the focus away
+    from the window the user is typing in."""
+    GWL_EXSTYLE = -20
+    WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x8, 0x80, 0x08000000
+    style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
+                             style | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)

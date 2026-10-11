@@ -16,9 +16,13 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from ctypes import wintypes
+from dataclasses import dataclass
 
 import winapi as w
+from overlay import Mark, Overlay
+from spell import Speller, prefer_spelling
 from stats import Stats
 from engine import (BUILTIN_TABLES, PRIMARY_LANGID, Correction, Detector, Layout,
                     fix_accidental_caps)
@@ -101,11 +105,32 @@ def set_autostart(enabled):
 
 # ---------------------------------------------------------------- core
 
+MAX_MARKS = 5
+
+
+@dataclass
+class MarkState:
+    """A doubtful word left on screen with a red mark."""
+    id: int
+    hwnd: int
+    word: str           # as it is on screen
+    suggestions: list
+    lang: str
+    after: int          # characters typed after the word (the caret is that far right)
+
+
 class Fixer:
     def __init__(self):
         self.enabled = True
         self.fix_caps = True
+        self.spell = True
         self.detector = None
+        self.speller = None
+        self.overlay = None
+        self.marks = {}         # id -> MarkState
+        self.mark_lock = threading.Lock()
+        self._mark_seq = 0
+        self.word_start = None  # caret (x, top, bottom) when the word's first key was pressed
         self.layouts = {}       # hkl -> Layout
         self.by_lang = {}       # lang -> Layout used when switching to it
         self.word = []          # keys of the word being typed: (vk, shift, caps)
@@ -127,6 +152,7 @@ class Fixer:
                             langs=tuple(sorted({l.lang for l in self.layouts.values()})),
                             exceptions=load_exceptions())
         self.detector = detector
+        self.speller = Speller(detector)
         log.info("dictionaries loaded: %s", ", ".join(detector.langs))
 
     def refresh_layouts(self):
@@ -157,6 +183,110 @@ class Fixer:
         self.word = []
         self.last_word = None
         self.last_fix = None
+        self.clear_marks()
+
+    # --- red marks
+
+    def clear_marks(self):
+        with self.mark_lock:
+            if not self.marks:
+                return
+            self.marks.clear()
+        if self.overlay:
+            self.overlay.clear()
+
+    def shift_marks(self, delta):
+        """Text was typed (+) or erased (-) after the marked words."""
+        gone = []
+        with self.mark_lock:
+            for mid, m in list(self.marks.items()):
+                m.after += delta
+                if m.after < 1 and delta < 0:   # erased up to (or into) the word
+                    del self.marks[mid]
+                    gone.append(mid)
+        for mid in gone:
+            if self.overlay:
+                self.overlay.remove(mid)
+
+    def add_mark(self, res, lang):
+        end = self.caret_fast()
+        start = self.word_start
+        with self.mark_lock:
+            self._mark_seq += 1
+            mid = self._mark_seq
+            # after=0: the space that ends the word is counted by on_boundary.
+            self.marks[mid] = MarkState(mid, self.hwnd, res.old_text, res.suggestions, lang, 0)
+            for old in sorted(self.marks)[:-MAX_MARKS]:
+                del self.marks[old]
+                if self.overlay:
+                    self.overlay.remove(old)
+        if self.overlay is None:
+            return
+        if start and end and abs(start[1] - end[1]) < 4 and end[0] > start[0]:
+            self.overlay.show(Mark(mid, res.old_text, res.suggestions,
+                                   start[0], start[1], start[2], end[0]))
+        else:
+            self.actions.put(lambda: self.locate_mark(mid))
+
+    def caret_fast(self):
+        try:
+            return w.caret_rect_fast()
+        except Exception:
+            return None
+
+    def locate_mark(self, mid):
+        """Worker: place a mark when the app has no system caret (Chrome & co).
+
+        The caret is asked for through accessibility after the space went in;
+        the word's start is estimated from the caret height."""
+        time.sleep(0.03)
+        rect = w.caret_rect()
+        with self.mark_lock:
+            m = self.marks.get(mid)
+        if not rect or not m:
+            return
+        x, top, bottom = rect
+        cw = max(5, int((bottom - top) * 0.5))
+        end_x = x - cw
+        self.overlay.show(Mark(mid, m.word, m.suggestions,
+                               end_x - cw * len(m.word), top, bottom, end_x))
+
+    def pick_suggestion(self, mid, text):
+        """Overlay thread: the user clicked a suggestion."""
+        self.actions.put(lambda: self.apply_mark(mid, text))
+
+    def apply_mark(self, mid, text):
+        with self.mark_lock:
+            m = self.marks.pop(mid, None)
+            if m is None or w.foreground_window() != m.hwnd:
+                return
+            delta = len(text) - len(m.word)
+            later = []
+            for oid, o in list(self.marks.items()):
+                if oid < mid:
+                    o.after += delta
+                else:                   # their screen positions just moved
+                    del self.marks[oid]
+                    later.append(oid)
+        for oid in later:
+            self.overlay.remove(oid)
+        w.send_inputs(w.vk_press(w.VK_LEFT, m.after) + w.vk_press(w.VK_BACK, len(m.word))
+                      + w.unicode_text(text) + w.vk_press(w.VK_RIGHT, m.after))
+        self.stats.record("suggest", m.word, text, m.lang, m.lang)
+        self.stats.save()
+        log.info("suggestion %r -> %r", m.word, text)
+
+    def keep_word(self, mid):
+        """Overlay thread: the user clicked the word itself, it is right."""
+        with self.mark_lock:
+            m = self.marks.pop(mid, None)
+        if m is None:
+            return
+        word = m.word.strip(".,!?;:()\"'«»")
+        if self.detector:
+            self.detector.exceptions.add(word.lower())
+        self.actions.put(lambda: add_exception(word))
+        log.info("kept %r, added to exceptions", word)
 
     def on_key(self, vk):
         hwnd = w.foreground_window()
@@ -178,7 +308,9 @@ class Fixer:
             if self.word:
                 self.word.pop()
             else:
-                self.reset()
+                self.last_word = None
+                self.last_fix = None
+            self.shift_marks(-1)
             return False
 
         if vk in BOUNDARY_KEYS:
@@ -190,13 +322,24 @@ class Fixer:
             self.reset()        # arrows, Home, Delete, F-keys... cursor moved
             return False
         self.stats.on_key()
+        if not self.word:
+            self.word_start = self.caret_fast()
         self.word.append((vk, w.key_down(w.VK_SHIFT), w.caps_on()))
+        self.shift_marks(1)
         if len(self.word) > 40:
             self.word = []
         self.last_fix = None
         return False
 
     def on_boundary(self, vk):
+        swallowed = self.check_word(vk)
+        if vk == w.VK_SPACE:
+            self.shift_marks(1)
+        else:
+            self.clear_marks()          # new line or next field: positions are gone
+        return swallowed
+
+    def check_word(self, vk):
         keys, self.word = self.word, []
         self.last_fix = None
         lay = self.layout_now()
@@ -212,10 +355,24 @@ class Fixer:
                                             prefer=self.prev_lang)
             except Exception:
                 log.exception("detector failed")
+        res = None
+        if self.enabled and self.spell and self.speller is not None:
+            try:
+                res = self.speller.check(lay.type_keys(caps_keys or keys), lay.lang)
+                if prefer_spelling(self.detector, corr, res):
+                    corr = None
+                else:
+                    res = res if corr is None else None
+            except Exception:
+                log.exception("speller failed")
+                res = None
         if caps_keys:
             old = lay.type_keys(keys)
             if corr:
                 corr = Correction(lay.lang, corr.target_lang, old, corr.new_text, caps=True)
+            elif res and res.auto:
+                corr = Correction(lay.lang, lay.lang, old, res.new_text, caps=True)
+                res = None
             else:
                 corr = Correction(lay.lang, lay.lang, old, lay.type_keys(caps_keys), caps=True)
         if corr:
@@ -229,8 +386,24 @@ class Fixer:
             self.last_word = None
             self.actions.put(lambda: self.replace(len(corr.old_text), corr.new_text,
                                                   target.hkl, vk, toggle_caps=corr.caps))
+            self.shift_marks(len(corr.new_text) - len(corr.old_text))
             log.info("fixed %r -> %r", corr.old_text, corr.new_text)
             return True
+
+        if res and res.auto:
+            corr = Correction(lay.lang, lay.lang, res.old_text, res.new_text)
+            saved = self.stats.record("spell", corr.old_text, corr.new_text, lay.lang, lay.lang)
+            self.actions.put(self.stats.save)
+            self.last_fix = (corr, keys, vk, "spell", saved)
+            self.last_word = None
+            self.prev_lang = lay.lang
+            self.actions.put(lambda: self.replace(len(corr.old_text), corr.new_text,
+                                                  lay.hkl, vk))
+            self.shift_marks(len(corr.new_text) - len(corr.old_text))
+            log.info("spelling %r -> %r", corr.old_text, corr.new_text)
+            return True
+        if res and vk == w.VK_SPACE:
+            self.add_mark(res, lay.lang)
         self.prev_lang = lay.lang
         self.last_word = (keys, lay, vk)
         return False
@@ -304,6 +477,10 @@ class Fixer:
         w.send_inputs(inputs)
 
     def worker(self):
+        try:
+            w.com_init()
+        except Exception:
+            log.exception("COM init failed")
         while True:
             action = self.actions.get()
             if action is None:
@@ -329,7 +506,9 @@ class Fixer:
 
         def mouse_proc(n_code, wparam, lparam):
             if n_code == 0 and wparam in (w.WM_LBUTTONDOWN, w.WM_RBUTTONDOWN, w.WM_MBUTTONDOWN):
-                self.on_click()
+                pt = ctypes.cast(lparam, ctypes.POINTER(w.MSLLHOOKSTRUCT)).contents.pt
+                if not (self.overlay and self.overlay.contains(pt.x, pt.y)):
+                    self.on_click()
             return w.user32.CallNextHookEx(None, n_code, wparam, lparam)
 
         module = w.kernel32.GetModuleHandleW(None)
@@ -416,6 +595,13 @@ def run_tray(fixer, settings):
         settings["fix_caps"] = fixer.fix_caps
         save_settings(settings)
 
+    def toggle_spell(icon, item):
+        fixer.spell = not fixer.spell
+        settings["spell"] = fixer.spell
+        save_settings(settings)
+        if not fixer.spell:
+            fixer.clear_marks()
+
     def toggle_autostart(icon, item):
         set_autostart(not autostart_enabled())
 
@@ -443,6 +629,8 @@ def run_tray(fixer, settings):
                          checked=lambda item: fixer.enabled),
         pystray.MenuItem("Исправлять случайный Caps Lock (hELLO -> Hello)", toggle_caps,
                          checked=lambda item: fixer.fix_caps),
+        pystray.MenuItem("Проверка орфографии (ტბილისი -> თბილისი, teh -> the)", toggle_spell,
+                         checked=lambda item: fixer.spell),
         pystray.MenuItem("Запускать вместе с Windows", toggle_autostart,
                          checked=lambda item: autostart_enabled()),
         pystray.Menu.SEPARATOR,
@@ -463,6 +651,7 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
     if not w.single_instance("Local\\LayoutFixer-single-instance"):
         return
+    w.set_dpi_aware()
 
     settings = load_settings()
     if not settings.get("autostart_configured"):
@@ -478,6 +667,12 @@ def main():
     fixer.stats = Stats(STATS_FILE)
     fixer.enabled = settings.get("enabled", True)
     fixer.fix_caps = settings.get("fix_caps", True)
+    fixer.spell = settings.get("spell", True)
+    try:
+        fixer.overlay = Overlay(fixer.pick_suggestion, fixer.keep_word,
+                                w.cursor_pos, w.make_tool_window)
+    except Exception:
+        log.exception("overlay failed, suggestions are off")
     threading.Thread(target=fixer.worker, daemon=True).start()
     threading.Thread(target=fixer.hook_loop, daemon=True).start()
 
