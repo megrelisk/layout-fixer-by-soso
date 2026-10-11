@@ -3,6 +3,9 @@
 Runs Tk in its own thread; other threads talk to it through a queue. The
 windows never take the keyboard focus, so the user keeps typing where they were.
 
+It also shows a small language badge (KA / EN / RU) at the cursor for a moment
+when the keyboard layout changes.
+
 A mark sits under the first letter of a doubtful word. Hovering anywhere over
 the word opens a popup above it with up to two suggestions and the word itself:
 clicking a suggestion replaces the word, clicking the word keeps it.
@@ -18,6 +21,9 @@ from dataclasses import dataclass, field
 MARK_COLOR = "#e53935"
 HIDE_DELAY = 0.7        # seconds the mouse may be away before the popup closes
 MAX_AGE = 600           # a mark older than this is dropped
+BADGE_SHOW = 1.0        # seconds the language badge stays fully visible
+BADGE_FADE = 0.4        # ...and then fades out
+POLL_EVERY = 4          # ask for a badge every 4th tick (~160 ms)
 
 
 @dataclass
@@ -44,11 +50,12 @@ def _inside(box, x, y):
 
 
 class Overlay:
-    def __init__(self, on_pick, on_keep, cursor_pos, make_tool_window):
+    def __init__(self, on_pick, on_keep, cursor_pos, make_tool_window, poll=None):
         self._on_pick = on_pick        # (mark_id, replacement)
         self._on_keep = on_keep        # (mark_id)
         self._cursor_pos = cursor_pos
         self._make_tool_window = make_tool_window
+        self._poll = poll              # () -> (text, color, x, y) or None
         self._cmds = queue.Queue()
         self._boxes = []               # screen boxes of our windows, for the mouse hook
         self._lock = threading.Lock()
@@ -83,6 +90,8 @@ class Overlay:
             self.marks = {}         # id -> (Mark, Toplevel)
             self.popup = None       # (mark_id, Toplevel, box)
             self.away_since = None
+            self.badge = None       # (Toplevel, shown_at)
+            self.ticks = 0
             self.root.after(40, self._tick)
             self.ready.set()
             self.root.mainloop()
@@ -117,6 +126,7 @@ class Overlay:
             if now - mark.created > MAX_AGE:
                 self._do_remove(mid)
         self._hover()
+        self._badge_tick(now)
         self._publish_boxes()
         self.root.after(40, self._tick)
 
@@ -126,6 +136,38 @@ class Overlay:
         win.configure(bg=MARK_COLOR)
         win.geometry(f"{mark.letter_width}x3+{mark.x}+{mark.bottom + 1}")
         self.marks[mark.id] = (mark, win)
+
+    def _badge_tick(self, now):
+        self.ticks += 1
+        if self._poll and self.ticks % POLL_EVERY == 0:
+            try:
+                found = self._poll()
+            except Exception:
+                logging.getLogger("LayoutFixer").exception("badge poll failed")
+                found = None
+            if found:
+                self._show_badge(*found)
+        if self.badge:
+            win, shown = self.badge
+            age = now - shown
+            if age > BADGE_SHOW + BADGE_FADE:
+                win.destroy()
+                self.badge = None
+            elif age > BADGE_SHOW:
+                try:
+                    win.attributes("-alpha", max(0.0, 1 - (age - BADGE_SHOW) / BADGE_FADE))
+                except Exception:
+                    pass
+
+    def _show_badge(self, text, color, x, y):
+        if self.badge:
+            self.badge[0].destroy()
+        win = self._window()
+        win.configure(bg=color)
+        self.tk.Label(win, text=text, bg=color, fg="white", padx=7, pady=1,
+                      font=("Segoe UI", 10, "bold")).pack()
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self.badge = (win, time.monotonic())
 
     def _do_remove(self, mark_id):
         if self.popup and self.popup[0] == mark_id:

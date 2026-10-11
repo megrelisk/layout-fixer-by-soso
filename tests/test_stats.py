@@ -2,8 +2,16 @@ from datetime import date
 
 import pytest
 
+import i18n
 import stats as st
 from stats import Stats, format_duration, seconds_saved
+
+
+@pytest.fixture(autouse=True)
+def russian():
+    i18n.set_lang("ru")
+    yield
+    i18n.set_lang(i18n.DEFAULT)
 
 
 class Clock:

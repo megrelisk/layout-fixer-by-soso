@@ -23,9 +23,13 @@ from dataclasses import dataclass
 import winapi as w
 from overlay import Mark, Overlay
 from spell import Speller, prefer_spelling
+from feedback import Feedback, write_report
+from i18n import t
+from learn import Learner
 from stats import Stats
+import i18n
 import updater
-from engine import (BUILTIN_TABLES, PRIMARY_LANGID, Correction, Detector, Layout,
+from engine import (EARLY_LENGTHS, BUILTIN_TABLES, PRIMARY_LANGID, Correction, Detector, Layout,
                     fix_accidental_caps)
 
 APP_NAME = "LayoutFixer"
@@ -33,7 +37,6 @@ APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_N
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 EXCEPTIONS_FILE = os.path.join(APP_DIR, "exceptions.txt")
 STATS_FILE = os.path.join(APP_DIR, "stats.json")
-TRAY_TITLE = "LayoutFixer - EN / RU / KA\nPause/Break: отменить или исправить вручную"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 BOUNDARY_KEYS = (w.VK_SPACE, w.VK_RETURN, w.VK_TAB)
@@ -126,6 +129,14 @@ class Fixer:
         self.enabled = True
         self.fix_caps = True
         self.spell = True
+        self.early = True
+        self.learn = True
+        self.badge = True
+        self.early_done = False     # the current word was already switched early
+        self.learner = Learner()
+        self.feedback = Feedback()
+        self._badge_seen = None
+        self._badge_com = threading.local()
         self.detector = None
         self.speller = None
         self.overlay = None
@@ -154,8 +165,16 @@ class Fixer:
                             langs=tuple(sorted({l.lang for l in self.layouts.values()})),
                             exceptions=load_exceptions())
         self.detector = detector
+        self.load_personal()
         self.speller = Speller(detector)
         log.info("dictionaries loaded: %s", ", ".join(detector.langs))
+
+    def load_personal(self):
+        if self.detector is None:
+            return
+        self.detector.personal = {lang: set() for lang in self.detector.langs}
+        for lang, word in self.learner.words:
+            self.detector.add_personal(lang, word)
 
     def refresh_layouts(self):
         layouts, by_lang = {}, {}
@@ -253,6 +272,31 @@ class Fixer:
         self.overlay.show(Mark(mid, m.word, m.suggestions,
                                end_x - cw * len(m.word), top, bottom, end_x))
 
+    BADGE = {"ka": ("KA", "#c62828"), "en": ("EN", "#1565c0"), "ru": ("RU", "#2e7d32")}
+
+    def badge_poll(self):
+        """Overlay thread: the language badge to show, if the layout of the
+        window being typed in has just changed. (text, color, x, y) or None."""
+        if not self.badge:
+            self._badge_seen = None
+            return None
+        hwnd = w.foreground_window()
+        hkl = w.current_layout(hwnd)
+        lang = PRIMARY_LANGID.get(w.langid_of(hkl) & 0x3FF)
+        seen, self._badge_seen = self._badge_seen, (hwnd, lang)
+        if not seen or seen[0] != hwnd or seen[1] == lang or lang not in self.BADGE:
+            return None
+        if not getattr(self._badge_com, "ready", False):
+            w.com_init()
+            self._badge_com.ready = True
+        text, color = self.BADGE[lang]
+        rect = w.caret_rect()
+        if rect:
+            x, top, _ = rect
+            return text, color, x + 2, top - 26
+        cx, cy = w.cursor_pos()
+        return text, color, cx + 14, cy + 18
+
     def pick_suggestion(self, mid, text):
         """Overlay thread: the user clicked a suggestion."""
         self.actions.put(lambda: self.apply_mark(mid, text))
@@ -276,6 +320,10 @@ class Fixer:
                       + w.unicode_text(text) + w.vk_press(w.VK_RIGHT, m.after))
         self.stats.record("suggest", m.word, text, m.lang, m.lang)
         self.stats.save()
+        self.feedback.pick(m.lang, m.word, text)
+        self.feedback.save()
+        if self.learner.waiting and self.learner.waiting[1] == m.word.strip():
+            self.learner.erased()
         log.info("suggestion %r -> %r", m.word, text)
 
     def keep_word(self, mid):
@@ -285,10 +333,13 @@ class Fixer:
         if m is None:
             return
         word = m.word.strip(".,!?;:()\"'«»")
+        self.learner.add(m.lang, word)
         if self.detector:
-            self.detector.exceptions.add(word.lower())
-        self.actions.put(lambda: add_exception(word))
-        log.info("kept %r, added to exceptions", word)
+            self.detector.add_personal(m.lang, word)
+        self.feedback.keep(m.lang, word)
+        self.actions.put(self.learner.save)
+        self.actions.put(self.feedback.save)
+        log.info("kept a word, added to personal words")
 
     def on_key(self, vk):
         hwnd = w.foreground_window()
@@ -312,6 +363,7 @@ class Fixer:
             else:
                 self.last_word = None
                 self.last_fix = None
+                self.learner.erased()
             self.shift_marks(-1)
             return False
 
@@ -326,12 +378,39 @@ class Fixer:
         self.stats.on_key()
         if not self.word:
             self.word_start = self.caret_fast()
+            self.early_done = False
         self.word.append((vk, w.key_down(w.VK_SHIFT), w.caps_on()))
         self.shift_marks(1)
         if len(self.word) > 40:
             self.word = []
         self.last_fix = None
-        return False
+        return self.check_early(lay)
+
+    def check_early(self, lay):
+        """After 4-6 letters: switch now if the word clearly started in the wrong
+        layout. The key just pressed is held back and retyped in the new layout."""
+        if not (self.enabled and self.early) or self.early_done or self.detector is None \
+                or len(self.word) not in EARLY_LENGTHS:
+            return False
+        try:
+            corr = self.detector.decide_early(self.word, lay, list(self.by_lang.values()),
+                                              prefer=self.prev_lang)
+        except Exception:
+            log.exception("early check failed")
+            return False
+        if corr is None:
+            return False
+        self.early_done = True
+        target = self.by_lang[corr.target_lang]
+        self.prev_lang = corr.target_lang
+        saved = self.stats.record("early", corr.old_text, corr.new_text,
+                                  corr.source_lang, corr.target_lang)
+        self.actions.put(self.stats.save)
+        self.last_fix = (corr, list(self.word), None, "early", saved)
+        erase = len(corr.old_text) - 1     # the last key never reached the app
+        self.actions.put(lambda: self.replace(erase, corr.new_text, target.hkl, None))
+        log.info("early fix %r -> %r", corr.old_text, corr.new_text)
+        return True
 
     def on_boundary(self, vk):
         swallowed = self.check_word(vk)
@@ -342,6 +421,12 @@ class Fixer:
         return swallowed
 
     def check_word(self, vk):
+        learned = self.learner.next_word()     # the previous word was not erased
+        if learned:
+            if self.detector:
+                self.detector.add_personal(*learned)
+            self.actions.put(self.learner.save)
+            log.info("learned a new word (%s)", learned[0])
         keys, self.word = self.word, []
         self.last_fix = None
         lay = self.layout_now()
@@ -406,9 +491,18 @@ class Fixer:
             return True
         if res and vk == w.VK_SPACE:
             self.add_mark(res, lay.lang)
+        if self.learn and vk == w.VK_SPACE and self.detector is not None:
+            self.maybe_learn(lay, keys)
         self.prev_lang = lay.lang
         self.last_word = (keys, lay, vk)
         return False
+
+    def maybe_learn(self, lay, keys):
+        from engine import _SCRIPT, _split_core
+        _, core, _ = _split_core(lay.type_keys(keys) or "")
+        if len(core) >= 3 and _SCRIPT[lay.lang].match(core) \
+                and self.detector.score(lay.lang, core) is None:
+            self.learner.candidate(lay.lang, core)
 
     def on_click(self):
         self.reset()
@@ -424,8 +518,12 @@ class Fixer:
             source = self.by_lang.get(corr.source_lang)
             if source is None:
                 return
-            erase = len(corr.new_text) + (1 if vk != w.VK_RETURN else 0)
-            retype = vk if vk != w.VK_RETURN else None
+            self.feedback.undo(kind, corr.source_lang, corr.target_lang,
+                               corr.old_text, corr.new_text)
+            self.actions.put(self.feedback.save)
+            typed_boundary = vk not in (None, w.VK_RETURN)
+            erase = len(corr.new_text) + (1 if typed_boundary else 0)
+            retype = vk if typed_boundary else None
             self.prev_lang = corr.source_lang
             self.last_word = None
             self.actions.put(lambda: self.replace(erase, corr.old_text, source.hkl, retype,
@@ -568,6 +666,8 @@ def message_box(text, title, flags=0x40):
 
 def run_tray(fixer, settings):
     import pystray
+    import webbrowser
+    from urllib.parse import quote
 
     class TrayIcon(pystray.Icon):
         def _on_notify(self, wparam, lparam):
@@ -576,47 +676,82 @@ def run_tray(fixer, settings):
             super()._on_notify(wparam, lparam)
 
     def show_stats(icon, item):
-        message_box(fixer.stats.summary(), "LayoutFixer - статистика")
+        message_box(fixer.stats.summary(learned=len(fixer.learner.words)), t("stats.title"))
 
     def reset_stats(icon, item):
         def ask():
-            t, answer = message_box("Обнулить всю статистику?", "LayoutFixer", 0x24)
-            t.join()
+            box, answer = message_box(t("stats.reset_ask"), "LayoutFixer", 0x24)
+            box.join()
             if answer and answer[0] == 6:   # IDYES
                 fixer.stats.reset()
                 fixer.stats.save()
         threading.Thread(target=ask, daemon=True).start()
 
-    def toggle_enabled(icon, item):
-        fixer.enabled = not fixer.enabled
-        settings["enabled"] = fixer.enabled
-        save_settings(settings)
+    def toggle(attr, after=None):
+        def action(icon, item):
+            value = not getattr(fixer, attr)
+            setattr(fixer, attr, value)
+            settings[attr] = value
+            save_settings(settings)
+            if after:
+                after(value)
+        return action
 
-    def toggle_caps(icon, item):
-        fixer.fix_caps = not fixer.fix_caps
-        settings["fix_caps"] = fixer.fix_caps
-        save_settings(settings)
-
-    def toggle_spell(icon, item):
-        fixer.spell = not fixer.spell
-        settings["spell"] = fixer.spell
-        save_settings(settings)
-        if not fixer.spell:
-            fixer.clear_marks()
+    def checked(attr):
+        return lambda item: getattr(fixer, attr)
 
     def toggle_autostart(icon, item):
         set_autostart(not autostart_enabled())
 
-    def open_exceptions(icon, item):
-        os.makedirs(APP_DIR, exist_ok=True)
-        if not os.path.exists(EXCEPTIONS_FILE):
-            open(EXCEPTIONS_FILE, "a", encoding="utf-8").close()
-        subprocess.Popen(["notepad.exe", EXCEPTIONS_FILE])
+    def set_language(lang):
+        def action(icon, item):
+            i18n.set_lang(lang)
+            settings["ui_lang"] = lang
+            save_settings(settings)
+            icon.title = t("tray.title")
+            icon.update_menu()
+        return action
 
-    def reload_exceptions(icon, item):
+    def open_in_notepad(path, header=None):
+        os.makedirs(APP_DIR, exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(header or "")
+        subprocess.Popen(["notepad.exe", path])
+
+    def open_exceptions(icon, item):
+        open_in_notepad(EXCEPTIONS_FILE)
+
+    def open_words(icon, item):
+        fixer.learner.save()
+        open_in_notepad(fixer.learner.words_path)
+
+    def reload_files(icon, item):
         if fixer.detector:
-            fixer.detector.exceptions = load_exceptions()
+            fixer.detector.exceptions = load_exceptions() | fixer.detector.exceptions
+        fixer.learner.load()
+        fixer.load_personal()
         fixer.refresh_layouts()
+
+    def share(icon, item):
+        def work():
+            if fixer.feedback.empty() and not fixer.learner.words \
+                    and not sum(v for k, v in fixer.stats.totals().items() if k != "seconds"):
+                message_box(t("share.nothing"), "LayoutFixer")
+                return
+            langs = fixer.detector.langs if fixer.detector else ()
+            report = fixer.feedback.report(fixer.stats.totals(), fixer.learner.words, langs)
+            path = write_report(report, APP_DIR)
+            subprocess.Popen(["notepad.exe", path])
+            box, answer = message_box(t("share.ask"), "LayoutFixer", 0x24)
+            box.join()
+            if not answer or answer[0] != 6:
+                return
+            body = t("share.issue_body", file=os.path.basename(path), folder=APP_DIR,
+                     summary=fixer.feedback.summary(report))
+            webbrowser.open(f"https://github.com/{updater.REPO}/issues/new"
+                            f"?title={quote(t('share.issue_title'))}&body={quote(body)}")
+        threading.Thread(target=work, daemon=True).start()
 
     def quit_app(icon, item):
         fixer.stop()
@@ -626,16 +761,19 @@ def run_tray(fixer, settings):
 
     def update_label(item):
         if update_state["busy"]:
-            return "განახლება: იტვირთება..."
+            return t("menu.update_busy")
         if update_state["available"]:
-            return "განახლება: ახალი ვერსია მზადაა!"
-        return "განახლება"
+            return t("menu.update_ready")
+        return t("menu.update")
+
+    def update_error_text(e):
+        return t("update.failed", error=t("update.err." + e.key, detail=e.detail))
 
     def run_update(icon, item):
         if update_state["busy"]:
             return
         if not updater.can_update():
-            message_box("განახლება მუშაობს მხოლოდ LayoutFixer.exe-ში.", "LayoutFixer")
+            message_box(t("update.exe_only"), "LayoutFixer")
             return
 
         def work():
@@ -644,23 +782,23 @@ def run_tray(fixer, settings):
             try:
                 def progress(got, total):
                     if total:
-                        icon.title = f"LayoutFixer: განახლება {got * 100 // total}%"
+                        icon.title = t("update.progress", pct=got * 100 // total)
                 release = updater.update(progress)
             except updater.UpdateError as e:
                 log.warning("update failed: %s", e)
-                message_box(f"განახლება ვერ მოხერხდა:\n{e}", "LayoutFixer", 0x30)
+                message_box(update_error_text(e), "LayoutFixer", 0x30)
                 return
             except Exception:
                 log.exception("update failed")
-                message_box("განახლება ვერ მოხერხდა. დეტალები: log.txt", "LayoutFixer", 0x30)
+                message_box(t("update.failed_log"), "LayoutFixer", 0x30)
                 return
             finally:
                 update_state["busy"] = False
-                icon.title = TRAY_TITLE
+                icon.title = t("tray.title")
                 icon.update_menu()
             if release is None:
                 update_state["available"] = False
-                message_box("უკვე ბოლო ვერსია გაქვთ.", "LayoutFixer")
+                message_box(t("update.latest"), "LayoutFixer")
                 return
             log.info("updating to %s, restarting", release.commit)
             quit_app(icon, item)       # the new version is already starting
@@ -679,33 +817,43 @@ def run_tray(fixer, settings):
                 update_state["available"] = True
                 icon.update_menu()
                 try:
-                    icon.notify("ხელმისაწვდომია ახალი ვერსია.\n"
-                                "მარჯვენა კლიკი ხატულაზე → განახლება", "LayoutFixer")
+                    icon.notify(t("update.notify"), "LayoutFixer")
                 except Exception:
                     pass
             time.sleep(24 * 3600)
 
+    def item(key, action, **kw):
+        return pystray.MenuItem(lambda _: t(key), action, **kw)
+
+    languages = pystray.Menu(*(
+        pystray.MenuItem(i18n.NATIVE[lang], set_language(lang), radio=True,
+                         checked=lambda _, lang=lang: i18n.get_lang() == lang)
+        for lang in i18n.LANGS))
+
     menu = pystray.Menu(
-        pystray.MenuItem(lambda item: fixer.stats.short(), show_stats, enabled=False),
-        pystray.MenuItem("Статистика...", show_stats, default=True),
-        pystray.MenuItem("Обнулить статистику...", reset_stats),
+        pystray.MenuItem(lambda _: fixer.stats.short(), show_stats, enabled=False),
+        item("menu.stats", show_stats, default=True),
+        item("menu.reset_stats", reset_stats),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Автоисправление раскладки", toggle_enabled,
-                         checked=lambda item: fixer.enabled),
-        pystray.MenuItem("Исправлять случайный Caps Lock (hELLO -> Hello)", toggle_caps,
-                         checked=lambda item: fixer.fix_caps),
-        pystray.MenuItem("Проверка орфографии (ტბილისი -> თბილისი, teh -> the)", toggle_spell,
-                         checked=lambda item: fixer.spell),
-        pystray.MenuItem("Запускать вместе с Windows", toggle_autostart,
-                         checked=lambda item: autostart_enabled()),
+        item("menu.enabled", toggle("enabled"), checked=checked("enabled")),
+        item("menu.early", toggle("early"), checked=checked("early")),
+        item("menu.caps", toggle("fix_caps"), checked=checked("fix_caps")),
+        item("menu.spell", toggle("spell", lambda on: on or fixer.clear_marks()),
+             checked=checked("spell")),
+        item("menu.learn", toggle("learn"), checked=checked("learn")),
+        item("menu.badge", toggle("badge"), checked=checked("badge")),
+        item("menu.autostart", toggle_autostart, checked=lambda _: autostart_enabled()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Исключения (слова, которые не исправлять)...", open_exceptions),
-        pystray.MenuItem("Перечитать исключения и раскладки", reload_exceptions),
+        pystray.MenuItem(lambda _: t("menu.language"), languages),
+        item("menu.words", open_words),
+        item("menu.exceptions", open_exceptions),
+        item("menu.reload", reload_files),
+        item("menu.share", share),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(update_label, run_update),
-        pystray.MenuItem("Выход", quit_app),
+        item("menu.quit", quit_app),
     )
-    icon = TrayIcon(APP_NAME, make_icon_image(), TRAY_TITLE, menu)
+    icon = TrayIcon(APP_NAME, make_icon_image(), t("tray.title"), menu)
     if updater.can_update():
         threading.Thread(target=check_daily, daemon=True).start()
     icon.run()
@@ -727,6 +875,7 @@ def main():
                          daemon=True).start()
 
     settings = load_settings()
+    i18n.set_lang(settings.get("ui_lang", i18n.DEFAULT))
     if not settings.get("autostart_configured"):
         # The first launch registers the app to start with Windows.
         try:
@@ -741,9 +890,14 @@ def main():
     fixer.enabled = settings.get("enabled", True)
     fixer.fix_caps = settings.get("fix_caps", True)
     fixer.spell = settings.get("spell", True)
+    fixer.early = settings.get("early", True)
+    fixer.learn = settings.get("learn", True)
+    fixer.badge = settings.get("badge", True)
+    fixer.learner = Learner(APP_DIR)
+    fixer.feedback = Feedback(os.path.join(APP_DIR, "feedback.json"))
     try:
         fixer.overlay = Overlay(fixer.pick_suggestion, fixer.keep_word,
-                                w.cursor_pos, w.make_tool_window)
+                                w.cursor_pos, w.make_tool_window, poll=fixer.badge_poll)
     except Exception:
         log.exception("overlay failed, suggestions are off")
     threading.Thread(target=fixer.worker, daemon=True).start()

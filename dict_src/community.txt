@@ -1,0 +1,2 @@
+# Lessons from users' shared reports, merged by tools/apply_feedback.py.
+# lang <TAB> word <TAB> word|nofix

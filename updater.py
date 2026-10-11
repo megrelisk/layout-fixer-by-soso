@@ -30,7 +30,12 @@ TIMEOUT = 30
 
 
 class UpdateError(Exception):
-    pass
+    """key: what failed ("network", "no_exe", "download", "size", "hash"),
+    shown to the user through i18n as update.err.<key>."""
+
+    def __init__(self, key, detail=""):
+        super().__init__(f"{key}: {detail}" if detail else key)
+        self.key, self.detail = key, detail
 
 
 @dataclass
@@ -53,7 +58,7 @@ def parse_release(data):
                 sha256=digest.split(":", 1)[1] if digest.startswith("sha256:") else "",
                 published=data.get("published_at", ""),
             )
-    raise UpdateError("в релизе нет LayoutFixer.exe")
+    raise UpdateError("no_exe")
 
 
 def fetch_release(opener=urllib.request.urlopen):
@@ -65,7 +70,7 @@ def fetch_release(opener=urllib.request.urlopen):
     except UpdateError:
         raise
     except Exception as e:
-        raise UpdateError(f"не удалось связаться с GitHub: {e}") from e
+        raise UpdateError("network", str(e)) from e
 
 
 def is_newer(release):
@@ -95,13 +100,13 @@ def download(release, dest, opener=urllib.request.urlopen, progress=None):
                     progress(got, release.size)
     except Exception as e:
         _remove(tmp)
-        raise UpdateError(f"не удалось скачать обновление: {e}") from e
+        raise UpdateError("download", str(e)) from e
     if release.size and got != release.size:
         _remove(tmp)
-        raise UpdateError(f"файл скачался не полностью ({got} из {release.size} байт)")
+        raise UpdateError("size", f"{got} / {release.size}")
     if release.sha256 and sha.hexdigest() != release.sha256:
         _remove(tmp)
-        raise UpdateError("контрольная сумма не совпала, файл повреждён")
+        raise UpdateError("hash")
     os.replace(tmp, dest)
 
 

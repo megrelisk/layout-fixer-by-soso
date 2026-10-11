@@ -12,6 +12,8 @@ import time
 from collections import Counter
 from datetime import date, timedelta
 
+from i18n import t as tr
+
 # Rough costs in seconds.
 NOTICE = 1.5            # seeing the gibberish and realising what happened
 BACKSPACE = 0.12        # one Backspace press (fast tapping / key repeat)
@@ -20,7 +22,7 @@ CAPS_KEY = 0.5          # finding and pressing Caps Lock
 PAUSE_KEY = 0.5         # pressing Pause/Break for a manual conversion
 DEFAULT_KEY_INTERVAL = 0.25  # ~240 characters per minute until we measure
 
-KINDS = ("layout", "caps", "manual", "spell", "suggest")
+KINDS = ("layout", "early", "caps", "manual", "spell", "suggest")
 TOP_WORDS = 300
 
 
@@ -30,6 +32,8 @@ def seconds_saved(kind, old, new, key_interval):
     retype = (len(new) + 1) * key_interval
     if kind == "caps":
         return NOTICE + erase + CAPS_KEY + retype
+    if kind == "early":
+        kind = "layout"
     if kind == "spell":
         return NOTICE + erase + retype
     if kind == "suggest":
@@ -44,12 +48,12 @@ def seconds_saved(kind, old, new, key_interval):
 def format_duration(seconds):
     s = int(round(seconds))
     if s < 60:
-        return f"{s} с"
+        return tr("dur.s", s=s)
     m, s = divmod(s, 60)
     if m < 60:
-        return f"{m} мин {s} с" if s else f"{m} мин"
+        return tr("dur.ms", m=m, s=s) if s else tr("dur.m", m=m)
     h, m = divmod(m, 60)
-    return f"{h} ч {m} мин" if m else f"{h} ч"
+    return tr("dur.hm", h=h, m=m) if m else tr("dur.h", h=h)
 
 
 class Stats:
@@ -126,48 +130,49 @@ class Stats:
                     out[k] += day.get(k, 0)
         return out
 
-    def summary(self):
+    def summary(self, learned=0):
         today = self._today()
         periods = [
-            ("Сегодня", today),
-            ("За 7 дней", today - timedelta(days=6)),
-            ("За 30 дней", today - timedelta(days=29)),
-            ("Всего", None),
+            ("stats.today", today),
+            ("stats.week", today - timedelta(days=6)),
+            ("stats.month", today - timedelta(days=29)),
+            ("stats.all", None),
         ]
         lines = []
         for title, since in periods:
             t = self.totals(since)
             fixes = sum(t[k] for k in KINDS)
-            lines.append(f"{title}: {fixes} исправл., сэкономлено {format_duration(t['seconds'])}")
+            lines.append(tr("stats.line", title=tr(title), n=fixes,
+                            time=format_duration(t["seconds"])))
             if since is None:
-                lines.append(f"    раскладка {t['layout']}, Caps Lock {t['caps']}, "
-                             f"вручную (Pause) {t['manual']}, отменено {t['undo']}")
-                lines.append(f"    опечатки: исправлено сразу {t['spell']}, "
-                             f"выбрано из подсказок {t['suggest']}")
+                lines.append(tr("stats.kinds", layout=t["layout"] + t["early"], early=t["early"],
+                                caps=t["caps"], manual=t["manual"], undo=t["undo"]))
+                lines.append(tr("stats.kinds2", spell=t["spell"], suggest=t["suggest"]))
         names = {"en": "EN", "ru": "RU", "ka": "KA"}
         if self.pairs:
             lines.append("")
-            lines.append("Было набрано -> должно быть:")
+            lines.append(tr("stats.pairs"))
             for pair, n in self.pairs.most_common(6):
                 a, b = pair.split("->")
-                lines.append(f"    {names.get(a, a)} -> {names.get(b, b)}: {n}")
+                lines.append(f"    {names.get(a, a)} → {names.get(b, b)}: {n}")
         top = [(w, n) for w, n in self.words.most_common(10) if n > 0]
         if top:
             lines.append("")
-            lines.append("Чаще всего исправлялись: " + ", ".join(f"{w} ({n})" for w, n in top))
+            lines.append(tr("stats.top", words=", ".join(f"{w} ({n})" for w, n in top)))
+        if learned:
+            lines.append(tr("stats.learned", n=learned))
         cpm = 60 / self.key_interval if self.key_interval else 0
         lines.append("")
-        lines.append(f"Ваша скорость набора: около {cpm:.0f} знаков в минуту.")
-        lines.append("Время считается грубо: заметить ошибку, стереть слово Backspace,")
-        lines.append("переключить раскладку и набрать заново с вашей скоростью.")
+        lines.append(tr("stats.speed", cpm=f"{cpm:.0f}"))
+        lines.append(tr("stats.method"))
         if self.first_day:
-            lines.append(f"Статистика ведётся с {self.first_day}.")
+            lines.append(tr("stats.since", day=self.first_day))
         return "\n".join(lines)
 
     def short(self):
         t, a = self.totals(self._today()), self.totals()
-        return (f"Сэкономлено сегодня {format_duration(t['seconds'])}, "
-                f"всего {format_duration(a['seconds'])}")
+        return tr("stats.short", today=format_duration(t["seconds"]),
+                  total=format_duration(a["seconds"]))
 
     # --- storage
 

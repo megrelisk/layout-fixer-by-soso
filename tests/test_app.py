@@ -70,6 +70,7 @@ def env(monkeypatch, detector):
     fixer = app.Fixer()
     fixer.refresh_layouts()
     fixer.detector = detector
+    fixer.early = False         # tested on its own below
     done = []
     def replace(erase, text, hkl, vk, toggle_caps=False):
         done.append((erase, text, hkl, vk) + (("caps",) if toggle_caps else ()))
@@ -310,8 +311,9 @@ def test_keeping_the_word_remembers_it(spell_env):
     fake.layout = HKL[KA]
     type_text(fake, fixer, KA, "სახლსი ")
     fixer.keep_word(fixer.overlay.shown[0].id)
-    assert fixer.marks == {} and "სახლსი" in fixer.detector.exceptions
-    fixer.detector.exceptions.discard("სახლსი")
+    assert fixer.marks == {} and fixer.detector.is_word(KA, "სახლსი")
+    assert ("ka", "სახლსი") in fixer.learner.words
+    fixer.detector.personal[KA].discard("სახლსი")
 
 
 def test_backspace_into_the_marked_word_drops_the_mark(spell_env):

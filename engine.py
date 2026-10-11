@@ -139,6 +139,16 @@ def _split_core(text):
 # ~7 is "the"/"და", ~4 an everyday word, ~2 a rare one.
 SCORE_SCALE = 20          # score byte = zipf * SCORE_SCALE
 HUNSPELL_ONLY_ZIPF = 1.5  # valid by the spell checker, absent from the frequency list
+COMMUNITY_ZIPF = 3.0      # accepted from users' shared reports (dict_src/community.txt)
+PERSONAL_ZIPF = 4.0       # this user's own learned words
+PREFIX_LENGTHS = (3, 4, 5, 6)
+
+# Early fix: after this many letters, a word nobody starts like this in the
+# current language, but that begins a common word in another layout, is
+# switched right away instead of waiting for the space.
+EARLY_LENGTHS = (4, 5, 6)
+EARLY_MIN_ZIPF = 4.0
+EARLY_RIVAL = 1.5         # another layout this close: too early to tell, wait for the space
 
 # Decision thresholds, tuned with tools/evaluate.py.
 MIN_ZIPF_BY_LENGTH = {2: 4.5, 3: 3.0}  # an unknown short word needs a common replacement
@@ -194,11 +204,35 @@ class Detector:
     def __post_init__(self):
         self._dicts = {lang: WordSet(os.path.join(self.dict_dir, lang + ".bin"))
                        for lang in self.langs}
+        self._prefixes = {}
+        for lang in self.langs:
+            path = os.path.join(self.dict_dir, lang + ".pre.bin")
+            if os.path.exists(path):
+                self._prefixes[lang] = WordSet(path)
+        self.personal = {lang: set() for lang in self.langs}   # learned words
+        builtin = os.path.join(self.dict_dir, "exceptions.txt")
+        if os.path.exists(builtin):
+            with open(builtin, encoding="utf-8") as f:
+                self.exceptions |= {normalize(line.strip()) for line in f if line.strip()}
+
+    def add_personal(self, lang, word):
+        if lang in self.personal:
+            self.personal[lang].add(normalize(word))
+
+    def prefix_score(self, lang, start):
+        """Score of the most common word starting with `start`, None if none does."""
+        if normalize(start) in self.personal.get(lang, ()) or any(
+                w.startswith(normalize(start)) for w in self.personal.get(lang, ())):
+            return PERSONAL_ZIPF
+        table = self._prefixes.get(lang)
+        return table.zipf(start) if table is not None else None
 
     def score(self, lang, word):
         """Zipf score of `word` in `lang`, None if it is not a word there."""
         if lang not in self._dicts or not _SCRIPT[lang].match(word) or _odd_case(word):
             return None
+        if normalize(word) in self.personal.get(lang, ()):
+            return PERSONAL_ZIPF
         words = self._dicts[lang]
         z = words.zipf(word)
         if z is None and "-" in word:
@@ -210,6 +244,38 @@ class Detector:
 
     def is_word(self, lang, word):
         return self.score(lang, word) is not None
+
+    def decide_early(self, keys, current, layouts, prefer=None):
+        """Wrong layout noticed in the middle of a word (after 4-6 letters)?
+
+        Fires only when no word at all starts like this in the current language
+        and a common word starts like this in another layout."""
+        if len(keys) not in EARLY_LENGTHS or not self._prefixes:
+            return None
+        old = current.type_keys(keys)
+        if not old or any(c.isdigit() for c in old) or normalize(old) in self.exceptions:
+            return None
+        if _SCRIPT[current.lang].match(old) and not _odd_case(old) \
+                and self.prefix_score(current.lang, old) is not None:
+            return None
+        found = []
+        for lay in layouts:
+            if lay.lang == current.lang:
+                continue
+            new = lay.type_keys(keys)
+            if not new or not _SCRIPT[lay.lang].match(new) or _odd_case(new):
+                continue
+            z = self.prefix_score(lay.lang, new)
+            if z is not None:
+                rank = z + (PREFER_BONUS if lay.lang == prefer else 0)
+                found.append((rank, z, Correction(current.lang, lay.lang, old, new)))
+        if not found:
+            return None
+        found.sort(key=lambda f: f[0], reverse=True)
+        rank, z, best = found[0]
+        if z < EARLY_MIN_ZIPF or len(found) > 1 and found[1][0] >= rank - EARLY_RIVAL:
+            return None
+        return best
 
     def decide(self, keys, current, layouts, prefer=None):
         """Return a Correction if the word in `keys` was typed in the wrong layout.

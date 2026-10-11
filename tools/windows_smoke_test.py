@@ -184,6 +184,19 @@ def check_overlay():
         time.sleep(0.1)
     print(f"overlay: mark shown, popup open on hover: {ov.contains(300, 280)}")
 
+    once = [("KA", "#c62828", 400, 400)]
+    badge = Overlay(lambda *a: None, lambda *a: None, w.cursor_pos, w.make_tool_window,
+                    poll=lambda: once.pop() if once else None)
+    assert badge.ready.wait(20) and badge.error is None, badge.error
+    for _ in range(30):
+        if getattr(badge, "badge", None):
+            break
+        time.sleep(0.1)
+    assert badge.badge, "language badge did not appear"
+    time.sleep(2)
+    assert badge.badge is None, "language badge did not go away"
+    print("overlay: language badge shown and faded")
+
 
 def check_update():
     import shutil
@@ -216,6 +229,7 @@ def check_update():
 
 
 if __name__ == "__main__":
+    import app  # noqa: F401  (the whole program imports on Windows)
     check_tables()
     check_send_input()
     check_hook()

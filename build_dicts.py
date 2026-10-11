@@ -10,6 +10,13 @@ billion words) from the frequency lists, so that "valid but rare" can be told
 apart from "common": typing "the" in the Georgian layout gives "ტჰე", which
 does occur in Georgian web text, just very rarely.
 
+A second table, dicts/<lang>.pre.bin, holds every word beginning of 3 to 6
+letters with the score of the most common word that starts with it. It lets
+the app notice a wrong layout after the first few letters of a word.
+
+dict_src/community.txt collects what users' shared reports taught the project
+(see tools/apply_feedback.py): words to accept, and words never to "fix".
+
 Needs `spylls` (build time only):  python build_dicts.py
 """
 
@@ -19,7 +26,8 @@ import os
 import sys
 from array import array
 
-from engine import HUNSPELL_ONLY_ZIPF, SCORE_SCALE, normalize, word_hash
+from engine import (COMMUNITY_ZIPF, HUNSPELL_ONLY_ZIPF, PREFIX_LENGTHS, SCORE_SCALE,
+                    normalize, word_hash)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "dict_src")
@@ -80,25 +88,66 @@ def read_freq(lang):
     return {w: math.log10(c / total * 1e9) for w, c in counts.items()}
 
 
+def read_community():
+    """[(lang, word, kind)] from dict_src/community.txt; kind is "word" or "nofix"."""
+    path = os.path.join(SRC, "community.txt")
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) == 3 and not line.startswith("#"):
+                out.append(tuple(parts))
+    return out
+
+
+def write_table(path, scores):
+    keys = sorted(scores)
+    values = bytes(max(1, min(255, round(scores[k] * SCORE_SCALE))) for k in keys)
+    with open(path, "wb") as f:
+        f.write(len(keys).to_bytes(8, "little"))
+        array("Q", keys).tofile(f)
+        f.write(values)
+
+
 def build(lang):
-    scores = {}
+    words = {}
     for form in expand(os.path.join(SRC, lang)):
-        scores[word_hash(form)] = HUNSPELL_ONLY_ZIPF
+        words[normalize(form)] = HUNSPELL_ONLY_ZIPF
     freq = read_freq(lang)
     for word, zipf in freq.items():
+        words[word] = max(words.get(word, 0), zipf)
+    community = [w for l, w, kind in read_community() if l == lang and kind == "word"]
+    for word in community:
+        word = normalize(word)
+        words[word] = max(words.get(word, 0), COMMUNITY_ZIPF)
+
+    scores, prefixes = {}, {}
+    for word, zipf in words.items():
         h = word_hash(word)
         scores[h] = max(scores.get(h, 0), zipf)
-    keys = sorted(scores)
-    hashes = array("Q", keys)
-    values = bytes(max(1, min(255, round(scores[k] * SCORE_SCALE))) for k in keys)
+        for n in PREFIX_LENGTHS:
+            if len(word) >= n:
+                p = word_hash(word[:n])
+                if prefixes.get(p, 0) < zipf:
+                    prefixes[p] = zipf
     os.makedirs(OUT, exist_ok=True)
-    with open(os.path.join(OUT, lang + ".bin"), "wb") as f:
-        f.write(len(keys).to_bytes(8, "little"))
-        hashes.tofile(f)
-        f.write(values)
-    print(f"{lang}: {len(keys)} words, {len(freq)} with frequency", file=sys.stderr)
+    write_table(os.path.join(OUT, lang + ".bin"), scores)
+    write_table(os.path.join(OUT, lang + ".pre.bin"), prefixes)
+    print(f"{lang}: {len(scores)} words ({len(freq)} with frequency, "
+          f"{len(community)} from community), {len(prefixes)} prefixes", file=sys.stderr)
+
+
+def build_exceptions():
+    """Words users undid: shipped as built-in exceptions."""
+    lines = sorted({w for _, w, kind in read_community() if kind == "nofix"})
+    os.makedirs(OUT, exist_ok=True)
+    with open(os.path.join(OUT, "exceptions.txt"), "w", encoding="utf-8") as f:
+        f.write("".join(w + "\n" for w in lines))
 
 
 if __name__ == "__main__":
     for lang in sys.argv[1:] or ("en", "ru", "ka"):
         build(lang)
+    build_exceptions()
