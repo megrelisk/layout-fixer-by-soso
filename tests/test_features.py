@@ -308,3 +308,53 @@ def test_ctrl_backspace_of_an_early_fix(env):
     type_text(fake, fixer, RU, "приве")
     press(fake, fixer, fake.VK_BACK, fake.VK_CONTROL)
     assert fixer.feedback.struck("ghbd") == 1
+
+
+# --- earlier words of the line are fixed together
+
+def test_earlier_word_is_converted_with_the_fixed_one(env):
+    fake, fixer, done = env
+    type_text(fake, fixer, KA, "ამ ")           # "am": an English word, left alone
+    run_actions(fixer)
+    assert done == []
+    type_text(fake, fixer, KA, "გამარჯობა ")
+    run_actions(fixer)
+    assert done == [(12, "ამ გამარჯობა", HKL[KA], fake.VK_SPACE)]
+
+
+def test_correct_word_before_is_left_alone(env):
+    fake, fixer, done = env
+    type_text(fake, fixer, EN, "hello ")
+    type_text(fake, fixer, KA, "გამარჯობა ")
+    run_actions(fixer)
+    assert done == [(9, "გამარჯობა", HKL[KA], fake.VK_SPACE)]
+
+
+def test_enter_starts_a_new_line(env):
+    fake, fixer, done = env
+    type_text(fake, fixer, KA, "ამ")
+    fixer.on_key(fake.VK_RETURN)
+    type_text(fake, fixer, KA, "გამარჯობა ")
+    run_actions(fixer)
+    assert done == [(9, "გამარჯობა", HKL[KA], fake.VK_SPACE)]
+
+
+def test_pause_undoes_the_whole_combined_fix_but_learns_one_word(env):
+    fake, fixer, done = env
+    type_text(fake, fixer, KA, "ამ გამარჯობა ")
+    fixer.on_key(fake.VK_PAUSE)
+    run_actions(fixer)
+    assert done[-1] == (13, "am gamarjoba", HKL[EN], fake.VK_SPACE)
+    assert "gamarjoba" in fixer.detector.exceptions
+    assert "am gamarjoba" not in fixer.detector.exceptions
+    fixer.detector.exceptions.discard("gamarjoba")
+
+
+def test_shift_pause_converts_the_whole_line(env):
+    fake, fixer, done = env
+    type_text(fake, fixer, EN, "xqz qqz ")      # nonsense either way: nothing fixed
+    run_actions(fixer)
+    assert done == []
+    press(fake, fixer, fake.VK_PAUSE, fake.VK_SHIFT)
+    run_actions(fixer)
+    assert done == [(8, "чйя ййя ", HKL[RU], None)]

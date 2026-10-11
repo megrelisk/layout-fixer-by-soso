@@ -46,6 +46,9 @@ jobs:
       - name: Early fix quality
         run: python tools/evaluate_early.py 3000
 
+      - name: Line context quality
+        run: python tools/evaluate_context.py 1500
+
       - name: Stamp version
         shell: bash
         run: printf 'COMMIT = "%s"\nBUILT = "%s"\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%d)" > version.py
