@@ -43,6 +43,10 @@ jobs:
       - name: Spelling quality
         run: python tools/evaluate_spell.py 3000
 
+      - name: Stamp version
+        shell: bash
+        run: printf 'COMMIT = "%s"\nBUILT = "%s"\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%d)" > version.py
+
       - name: Build LayoutFixer.exe
         run: >
           pyinstaller --noconfirm --onefile --noconsole --name LayoutFixer

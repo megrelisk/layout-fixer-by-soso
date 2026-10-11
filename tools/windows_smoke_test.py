@@ -7,7 +7,9 @@
 - inside the hook, Caps Lock state is seen correctly after it is toggled;
 - in Notepad: the caret position can be read, and a word behind the caret can
   be replaced the way a picked suggestion is (Left, Backspace, text, Right);
-- the overlay can show a mark and a popup.
+- the overlay can show a mark and a popup;
+- self-update: the real release can be fetched and its checksum verified, and
+  a running exe can be swapped for a new one.
 """
 
 import ctypes
@@ -183,6 +185,36 @@ def check_overlay():
     print(f"overlay: mark shown, popup open on hover: {ov.contains(300, 280)}")
 
 
+def check_update():
+    import shutil
+    import tempfile
+    import updater
+    rel = updater.fetch_release()
+    print(f"latest release: commit {rel.commit[:7]}, {rel.size} bytes, "
+          f"sha256 {'reported' if rel.sha256 else 'MISSING'}")
+    tmp = tempfile.mkdtemp()
+    try:
+        updater.download(rel, os.path.join(tmp, "download.exe"))
+        print("release download verified")
+        # A running exe can be renamed and replaced.
+        exe = os.path.join(tmp, "LayoutFixer.exe")
+        shutil.copy(os.path.join(os.environ["SystemRoot"], "System32", "PING.EXE"), exe)
+        running = subprocess.Popen([exe, "-n", "30", "127.0.0.1"],
+                                   stdout=subprocess.DEVNULL)
+        time.sleep(1)
+        new_exe, old_exe = updater.paths(exe)
+        shutil.copy(os.path.join(tmp, "download.exe"), new_exe)
+        started = []
+        updater.install(new_exe, exe, launch=lambda args, **kw: started.append(args))
+        assert os.path.getsize(exe) == rel.size and os.path.exists(old_exe)
+        running.kill()
+        running.wait()
+        assert updater.cleanup_after_update(exe), "old exe not removed"
+        print("swap of a running exe: ok")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     check_tables()
     check_send_input()
@@ -191,4 +223,5 @@ if __name__ == "__main__":
     w.set_dpi_aware()
     check_notepad()
     check_overlay()
+    check_update()
     print("windows smoke test passed")

@@ -1,6 +1,7 @@
 """Thin ctypes wrappers around the Win32 calls the app needs."""
 
 import ctypes
+import time
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -245,9 +246,22 @@ def caps_on():
     return bool(user32.GetKeyState(VK_CAPITAL) & 1)
 
 
-def single_instance(name):
-    handle = kernel32.CreateMutexW(None, False, name)
-    return handle and ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+
+def single_instance(name, wait=0.0):
+    """True if no other copy runs. With wait > 0, wait that long for it to quit
+    (used right after an update, while the old version is still exiting)."""
+    deadline = time.monotonic() + wait
+    while True:
+        handle = kernel32.CreateMutexW(None, False, name)
+        if handle and ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
+            return True     # keep the handle open for the life of the process
+        if handle:
+            kernel32.CloseHandle(handle)    # or we would keep the mutex alive
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.3)
 
 
 # ---------------------------------------------------------------- screen helpers

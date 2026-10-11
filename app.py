@@ -24,6 +24,7 @@ import winapi as w
 from overlay import Mark, Overlay
 from spell import Speller, prefer_spelling
 from stats import Stats
+import updater
 from engine import (BUILTIN_TABLES, PRIMARY_LANGID, Correction, Detector, Layout,
                     fix_accidental_caps)
 
@@ -32,6 +33,7 @@ APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_N
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 EXCEPTIONS_FILE = os.path.join(APP_DIR, "exceptions.txt")
 STATS_FILE = os.path.join(APP_DIR, "stats.json")
+TRAY_TITLE = "LayoutFixer - EN / RU / KA\nPause/Break: отменить или исправить вручную"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 BOUNDARY_KEYS = (w.VK_SPACE, w.VK_RETURN, w.VK_TAB)
@@ -620,6 +622,69 @@ def run_tray(fixer, settings):
         fixer.stop()
         icon.stop()
 
+    update_state = {"available": None, "busy": False}
+
+    def update_label(item):
+        if update_state["busy"]:
+            return "განახლება: იტვირთება..."
+        if update_state["available"]:
+            return "განახლება: ახალი ვერსია მზადაა!"
+        return "განახლება"
+
+    def run_update(icon, item):
+        if update_state["busy"]:
+            return
+        if not updater.can_update():
+            message_box("განახლება მუშაობს მხოლოდ LayoutFixer.exe-ში.", "LayoutFixer")
+            return
+
+        def work():
+            update_state["busy"] = True
+            icon.update_menu()
+            try:
+                def progress(got, total):
+                    if total:
+                        icon.title = f"LayoutFixer: განახლება {got * 100 // total}%"
+                release = updater.update(progress)
+            except updater.UpdateError as e:
+                log.warning("update failed: %s", e)
+                message_box(f"განახლება ვერ მოხერხდა:\n{e}", "LayoutFixer", 0x30)
+                return
+            except Exception:
+                log.exception("update failed")
+                message_box("განახლება ვერ მოხერხდა. დეტალები: log.txt", "LayoutFixer", 0x30)
+                return
+            finally:
+                update_state["busy"] = False
+                icon.title = TRAY_TITLE
+                icon.update_menu()
+            if release is None:
+                update_state["available"] = False
+                message_box("უკვე ბოლო ვერსია გაქვთ.", "LayoutFixer")
+                return
+            log.info("updating to %s, restarting", release.commit)
+            quit_app(icon, item)       # the new version is already starting
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def check_daily():
+        time.sleep(60)
+        while True:
+            try:
+                available = updater.is_newer(updater.fetch_release())
+            except updater.UpdateError as e:
+                log.info("update check: %s", e)
+                available = None
+            if available and not update_state["available"]:
+                update_state["available"] = True
+                icon.update_menu()
+                try:
+                    icon.notify("ხელმისაწვდომია ახალი ვერსია.\n"
+                                "მარჯვენა კლიკი ხატულაზე → განახლება", "LayoutFixer")
+                except Exception:
+                    pass
+            time.sleep(24 * 3600)
+
     menu = pystray.Menu(
         pystray.MenuItem(lambda item: fixer.stats.short(), show_stats, enabled=False),
         pystray.MenuItem("Статистика...", show_stats, default=True),
@@ -637,11 +702,12 @@ def run_tray(fixer, settings):
         pystray.MenuItem("Исключения (слова, которые не исправлять)...", open_exceptions),
         pystray.MenuItem("Перечитать исключения и раскладки", reload_exceptions),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem(update_label, run_update),
         pystray.MenuItem("Выход", quit_app),
     )
-    icon = TrayIcon(APP_NAME, make_icon_image(),
-                        "LayoutFixer - EN / RU / KA\nPause/Break: отменить или исправить вручную",
-                        menu)
+    icon = TrayIcon(APP_NAME, make_icon_image(), TRAY_TITLE, menu)
+    if updater.can_update():
+        threading.Thread(target=check_daily, daemon=True).start()
     icon.run()
 
 
@@ -649,9 +715,16 @@ def main():
     os.makedirs(APP_DIR, exist_ok=True)
     logging.basicConfig(filename=os.path.join(APP_DIR, "log.txt"), level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
-    if not w.single_instance("Local\\LayoutFixer-single-instance"):
+    just_updated = "--updated" in sys.argv
+    # Right after an update the old version may still be closing: wait for it.
+    if not w.single_instance("Local\\LayoutFixer-single-instance",
+                             wait=20 if just_updated else 0):
         return
     w.set_dpi_aware()
+    log.info("LayoutFixer %s %s started", updater.version.COMMIT[:7], updater.version.BUILT)
+    if just_updated:
+        threading.Thread(target=updater.cleanup_after_update, args=(sys.executable,),
+                         daemon=True).start()
 
     settings = load_settings()
     if not settings.get("autostart_configured"):
