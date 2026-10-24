@@ -33,6 +33,54 @@ TEXTS = {
         "en": "LayoutFixer: EN / RU / KA\nPause/Break: undo or fix by hand",
         "ru": "LayoutFixer: EN / RU / KA\nPause/Break: отменить или исправить вручную",
     },
+    "menu.help": {"ka": "შესაძლებლობები და ცხელი კლავიშები...",
+                  "en": "Features and hotkeys...", "ru": "Возможности и горячие клавиши..."},
+    "help.title": {"ka": "LayoutFixer: შესაძლებლობები", "en": "LayoutFixer: features",
+                   "ru": "LayoutFixer: возможности"},
+    "help.text": {
+        "ka": "ავტომატური\n"
+              "• განლაგების გასწორება სიტყვის დასრულებისას (ინტერვალი/Enter/Tab) და ადრე, 4 ასოს შემდეგ\n"
+              "• შემთხვევითი Caps Lock-ის გასწორება (hELLO → Hello)\n"
+              "• ბეჭდვითი შეცდომები; ეჭვიან სიტყვას წითელი ნიშანი ეძლევა\n"
+              "• Enter ინახავს ასწორებად სიტყვას: წითელი ნიშანი; მეორე Enter აგზავნის უცვლელად\n"
+              "• წაშლილი გასწორება → სიტყვა გამონაკლისებში, აღარ შეიცვლება\n"
+              "• ჩემი სიტყვების დამახსოვრება; ავტოჩანაცვლება (autotext.txt)\n\n"
+              "ცხელი კლავიშები (იცვლება: მენიუ → ცხელი კლავიშები)\n"
+              "• {manual}: გასწორების გაუქმება ან სიტყვის გადაკეთება\n"
+              "• {line}: მთელი ხაზის გადაკეთება\n"
+              "• {selection}: მონიშნული ტექსტის გადაკეთება\n"
+              "• {toggle_app}: გამორთვა/ჩართვა მიმდინარე პროგრამაში\n\n"
+              "მენიუში: ხმა, ენა ხატულაზე და კურსორთან, პროგრამები სადაც გამორთულია, "
+              "გამონაკლისები, სტატისტიკა, გაზიარება, განახლება",
+        "en": "Automatic\n"
+              "• Layout fix when a word ends (Space/Enter/Tab) and early, after 4 letters\n"
+              "• Accidental Caps Lock fix (hELLO → Hello)\n"
+              "• Typos; doubtful words get a red mark\n"
+              "• Enter holds back a word that would be fixed: red mark; a second Enter sends it as is\n"
+              "• Erased fix → the word goes to exceptions and is not fixed again\n"
+              "• Learns your words; autotext (autotext.txt)\n\n"
+              "Hotkeys (change: menu → Hotkeys)\n"
+              "• {manual}: undo a fix or convert the word\n"
+              "• {line}: convert the whole line\n"
+              "• {selection}: convert the selected text\n"
+              "• {toggle_app}: off/on in the current app\n\n"
+              "In the menu: sound, language in the tray icon and at the cursor, apps where "
+              "it is off, exceptions, statistics, sharing, update",
+        "ru": "Автоматически\n"
+              "• Исправление раскладки при завершении слова (пробел/Enter/Tab) и раньше, после 4 букв\n"
+              "• Случайный Caps Lock (hELLO → Hello)\n"
+              "• Опечатки; сомнительное слово получает красную метку\n"
+              "• Enter задерживает слово, которое будет исправлено: красная метка; второй Enter отправит как есть\n"
+              "• Стёртое исправление → слово в исключениях и больше не исправляется\n"
+              "• Запоминает ваши слова; автозамена (autotext.txt)\n\n"
+              "Горячие клавиши (меняются: меню → Горячие клавиши)\n"
+              "• {manual}: отменить исправление или перевести слово\n"
+              "• {line}: перевести всю строку\n"
+              "• {selection}: перевести выделенный текст\n"
+              "• {toggle_app}: выкл/вкл в текущей программе\n\n"
+              "В меню: звук, язык на значке и у курсора, программы где отключено, "
+              "исключения, статистика, «Поделиться опытом», обновление",
+    },
     "menu.stats": {"ka": "სტატისტიკა...", "en": "Statistics...", "ru": "Статистика..."},
     "menu.reset_stats": {"ka": "სტატისტიკის განულება...", "en": "Reset statistics...",
                          "ru": "Обнулить статистику..."},

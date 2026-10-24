@@ -71,3 +71,16 @@ def write_defaults(path, header):
         f.write(header)
         for action in ACTIONS:
             f.write(f"{action} = {DEFAULTS[action]}\n")
+
+
+def describe(table):
+    """{action: "Alt+Pause"} for the current table."""
+    names = {v: k for k, v in _NAMED.items()}
+    out = {}
+    for (ctrl, alt, shift, win, vk), action in table.items():
+        parts = [m for m, on in (("Ctrl", ctrl), ("Alt", alt), ("Shift", shift), ("Win", win)) if on]
+        key = names.get(vk) or (f"F{vk - 0x6F}" if 0x70 <= vk <= 0x87 else chr(vk))
+        parts.append(key.capitalize() if len(key) > 1 and not key.startswith("F") else key.upper()
+                     if len(key) == 1 else key)
+        out[action] = "+".join(parts)
+    return out

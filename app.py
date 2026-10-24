@@ -1058,6 +1058,11 @@ def run_tray(fixer, settings):
     def show_stats(icon, item):
         message_box(fixer.stats.summary(learned=len(fixer.learner.words)), t("stats.title"))
 
+    def show_help(icon, item):
+        shown = hk.describe(fixer.hotkeys)
+        keys = {a: shown.get(a, "-") for a in hk.ACTIONS}
+        message_box(t("help.text", **keys), t("help.title"))
+
     def reset_stats(icon, item):
         def ask():
             box, answer = message_box(t("stats.reset_ask"), "LayoutFixer", 0x24)
@@ -1225,6 +1230,7 @@ def run_tray(fixer, settings):
 
     menu = pystray.Menu(
         pystray.MenuItem(lambda _: fixer.stats.short(), show_stats, enabled=False),
+        item("menu.help", show_help),
         item("menu.stats", show_stats, default=True),
         item("menu.reset_stats", reset_stats),
         pystray.Menu.SEPARATOR,
