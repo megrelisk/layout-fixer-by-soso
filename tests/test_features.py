@@ -184,7 +184,7 @@ def erase(fake, fixer, n):
         fixer.on_key(fake.VK_BACK)
 
 
-def test_erasing_a_fix_makes_the_program_ask_next_time(spell_env):
+def test_erasing_a_fix_stops_fixing_that_word(spell_env):
     fake, fixer, done = spell_env
     type_text(fake, fixer, EN, "teh ")
     run_actions(fixer)
@@ -196,8 +196,8 @@ def test_erasing_a_fix_makes_the_program_ask_next_time(spell_env):
     done.clear()
     type_text(fake, fixer, EN, "teh ")
     run_actions(fixer)
-    assert done == []                        # not fixed by itself any more...
-    assert fixer.overlay.shown[-1].suggestions == ["the"]   # ...but offered
+    assert done == []                        # one erase is enough: left alone for good
+    assert "teh" in fixer.detector.exceptions
 
 
 def test_second_erase_leaves_the_word_alone(spell_env):
@@ -358,3 +358,32 @@ def test_shift_pause_converts_the_whole_line(env):
     press(fake, fixer, fake.VK_PAUSE, fake.VK_SHIFT)
     run_actions(fixer)
     assert done == [(8, "чйя ййя ", HKL[RU], None)]
+
+
+# --- Enter: a word that is about to be changed is not sent
+
+def test_enter_holds_back_a_fix_and_marks_the_word(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, RU, "привет")
+    assert fixer.on_key(fake.VK_RETURN) is True      # swallowed, nothing retyped
+    run_actions(fixer)
+    assert done == []
+    assert fixer.overlay.shown[-1].suggestions == ["привет"]
+    assert fixer.marks
+
+
+def test_second_enter_sends_the_word_unchanged(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, RU, "привет")
+    fixer.on_key(fake.VK_RETURN)
+    assert fixer.on_key(fake.VK_RETURN) is False     # goes through as it is
+    run_actions(fixer)
+    assert done == [] and not fixer.marks
+
+
+def test_typing_after_held_enter_drops_the_mark(spell_env):
+    fake, fixer, done = spell_env
+    type_text(fake, fixer, RU, "привет")
+    fixer.on_key(fake.VK_RETURN)
+    fixer.on_key(fake.VK_BACK)
+    assert not fixer.marks and not fixer.enter_hold

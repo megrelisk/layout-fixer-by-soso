@@ -35,6 +35,7 @@ VK_HOME = 0x24
 VK_LEFT = 0x25
 VK_DELETE = 0x2E
 VK_Z = 0x5A
+VK_C = 0x43
 VK_RIGHT = 0x27
 VK_LWIN = 0x5B
 VK_RWIN = 0x5C
@@ -241,6 +242,14 @@ def unicode_text(text):
     return out
 
 
+def vk_down(vk):
+    return [_key_input(vk=vk)]
+
+
+def vk_up(vk):
+    return [_key_input(vk=vk, flags=KEYEVENTF_KEYUP)]
+
+
 def key_down(vk):
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
@@ -381,3 +390,103 @@ def make_tool_window(hwnd):
     style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
                              style | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+
+
+# ---------------------------------------------------------------- apps, clipboard, sound
+
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = ctypes.c_void_p
+kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.GetClipboardData.argtypes = [wintypes.UINT]
+user32.GetClipboardData.restype = ctypes.c_void_p
+user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+user32.SetClipboardData.restype = ctypes.c_void_p
+
+CF_UNICODETEXT = 13
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+GMEM_MOVEABLE = 0x2
+
+
+def process_name(hwnd=None):
+    """Program file name (notepad.exe, lower case) of the window, or ""."""
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd or user32.GetForegroundWindow(), ctypes.byref(pid))
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value.rsplit("\\", 1)[-1].lower()
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _open_clipboard():
+    for _ in range(10):         # another program may hold it for a moment
+        if user32.OpenClipboard(None):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def clipboard_get():
+    """Text on the clipboard, "" if there is none."""
+    if not _open_clipboard():
+        return ""
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return ""
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            return ""
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def clipboard_set(text):
+    """Replace the clipboard with `text` ("" empties it)."""
+    if not _open_clipboard():
+        return False
+    try:
+        user32.EmptyClipboard()
+        if not text:
+            return True
+        data = ctypes.create_unicode_buffer(text)
+        size = ctypes.sizeof(data)
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
+        if not handle:
+            return False
+        ptr = kernel32.GlobalLock(handle)
+        ctypes.memmove(ptr, data, size)
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+            kernel32.GlobalFree(handle)
+            return False
+        return True
+    finally:
+        user32.CloseClipboard()
+
+
+def play_sound(alias):
+    """A Windows system sound ("SystemAsterisk", "SystemExclamation"), not waiting for it."""
+    SND_ALIAS, SND_ASYNC, SND_NODEFAULT = 0x10000, 0x1, 0x2
+    try:
+        ctypes.WinDLL("winmm").PlaySoundW(alias, None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT)
+    except OSError:
+        pass
