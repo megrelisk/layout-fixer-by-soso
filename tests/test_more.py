@@ -148,3 +148,15 @@ def test_a_spelling_fix_flashes_a_badge(spell_env):
     fake, fixer, done = spell_env
     type_text(fake, fixer, EN, "teh ")
     assert fixer._flash and fixer._flash[0] == "✓"
+
+
+def test_help_text_shows_the_current_hotkeys():
+    import i18n
+    shown = hotkeys.describe(hotkeys.read(""))
+    assert shown == {"manual": "Pause", "line": "Shift+Pause", "selection": "Alt+Pause",
+                     "toggle_app": "Ctrl+Alt+F9"}
+    for lang in i18n.LANGS:
+        i18n.set_lang(lang)
+        text = i18n.t("help.text", **shown)
+        assert "Alt+Pause" in text and "{" not in text
+    i18n.set_lang(i18n.DEFAULT)
