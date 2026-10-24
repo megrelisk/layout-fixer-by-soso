@@ -100,6 +100,31 @@ class Layout:
         return "".join(out)
 
 
+def guess_source(text, layouts, prefer=None):
+    """The layout `text` was typed in: the one whose keys explain most letters
+    (`prefer` wins a tie). None if no letter fits any layout."""
+    best, best_n = None, 0
+    for lay in layouts:
+        chars = {ch for ch in lay.table.values()}
+        n = sum(1 for ch in text if ch.isalpha() and ch in chars)
+        if n > best_n or (n == best_n and n and lay is prefer):
+            best, best_n = lay, n
+    return best
+
+
+def convert_text(text, source, target):
+    """`text` as if typed on the same keys in the `target` layout. Characters
+    that are not on a key of `source` (digits, spaces, newlines) stay."""
+    keys = {}
+    for key, ch in source.table.items():
+        keys.setdefault(ch, key)
+    out = []
+    for ch in text:
+        new = target.table.get(keys[ch]) if ch in keys else None
+        out.append(new or ch)
+    return "".join(out)
+
+
 @dataclass
 class Correction:
     source_lang: str

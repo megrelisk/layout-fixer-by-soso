@@ -14,7 +14,7 @@ class FakeWin(types.ModuleType):
     VK_BACK, VK_TAB, VK_RETURN, VK_SHIFT = 0x08, 0x09, 0x0D, 0x10
     VK_CONTROL, VK_MENU, VK_PAUSE, VK_CAPITAL = 0x11, 0x12, 0x13, 0x14
     VK_SPACE, VK_LWIN, VK_RWIN = 0x20, 0x5B, 0x5C
-    VK_LEFT, VK_RIGHT, VK_HOME, VK_DELETE, VK_Z = 0x25, 0x27, 0x24, 0x2E, 0x5A
+    VK_LEFT, VK_RIGHT, VK_HOME, VK_DELETE, VK_Z, VK_C = 0x25, 0x27, 0x24, 0x2E, 0x5A, 0x43
 
     def __init__(self):
         super().__init__("winapi")
@@ -24,6 +24,9 @@ class FakeWin(types.ModuleType):
         self.switched = []
         self.sent = []
         self.caret_x = 100
+        self.clipboard = "old"
+        self.selection = ""
+        self.sounds = []
 
     def caret_rect_fast(self):
         self.caret_x += 8
@@ -37,9 +40,33 @@ class FakeWin(types.ModuleType):
 
     def send_inputs(self, inputs):
         self.sent.append(inputs)
+        if ("vk", 0x43) in inputs and self.selection:     # Ctrl+C copies the selection
+            self.clipboard = self.selection
 
     def foreground_window(self):
         return 1
+
+    def process_name(self, hwnd=None):
+        return "test.exe"
+
+    def vk_down(self, vk):
+        return [("down", vk)]
+
+    def vk_up(self, vk):
+        return [("up", vk)]
+
+    def clipboard_get(self):
+        return self.clipboard
+
+    def clipboard_set(self, text):
+        self.clipboard = text
+        return True
+
+    def switch_layout(self, hkl):
+        self.switched.append(hkl)
+
+    def play_sound(self, alias):
+        self.sounds.append(alias)
 
     def current_layout(self, hwnd=None):
         return self.layout
@@ -77,6 +104,7 @@ def env(monkeypatch, detector):
         done.append((erase, text, hkl, vk) + (("caps",) if toggle_caps else ()))
     fixer.replace = replace
     monkeypatch.setattr(app, "add_exception", lambda word: None)
+    monkeypatch.setattr(app.userlists, "write_apps", lambda *a: None)
     return fake, fixer, done
 
 

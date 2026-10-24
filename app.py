@@ -28,15 +28,20 @@ from i18n import t
 from learn import Learner
 from stats import Stats
 import i18n
+import hotkeys as hk
 import updater
+import userlists
 from engine import (EARLY_LENGTHS, BUILTIN_TABLES, PRIMARY_LANGID, Correction, Detector, Layout,
-                    fix_accidental_caps)
+                    convert_text, fix_accidental_caps, guess_source)
 
 APP_NAME = "LayoutFixer"
 APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 EXCEPTIONS_FILE = os.path.join(APP_DIR, "exceptions.txt")
 STATS_FILE = os.path.join(APP_DIR, "stats.json")
+HOTKEYS_FILE = os.path.join(APP_DIR, "hotkeys.txt")
+AUTOTEXT_FILE = os.path.join(APP_DIR, "autotext.txt")
+APPS_FILE = os.path.join(APP_DIR, "off_apps.txt")
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 BOUNDARY_KEYS = (w.VK_SPACE, w.VK_RETURN, w.VK_TAB)
@@ -136,6 +141,14 @@ class Fixer:
         self.early = True
         self.learn = True
         self.badge = True
+        self.sound = False
+        self.tray_icon = True
+        self.hotkeys = hk.read("")      # (ctrl, alt, shift, win, vk) -> action
+        self.autotext = {}              # abbreviation -> text
+        self.off_apps = set()           # program names where nothing is done
+        self.app_name = ""
+        self.app_off = False
+        self._flash = None              # (text, color) badge to show at the caret
         self.early_done = False     # the current word was already switched early
         self.watch = None           # the last automatic fix, watched for Backspace
         self.enter_hold = False     # Enter was held back: the last word waits for a decision
@@ -175,8 +188,15 @@ class Fixer:
                             exceptions=load_exceptions())
         self.detector = detector
         self.load_personal()
+        self.load_user_files()
         self.speller = Speller(detector)
         log.info("dictionaries loaded: %s", ", ".join(detector.langs))
+
+    def load_user_files(self):
+        self.hotkeys = hk.read(HOTKEYS_FILE)
+        self.autotext = userlists.read_autotext(AUTOTEXT_FILE)
+        self.off_apps = userlists.read_apps(APPS_FILE)
+        self.app_off = self.app_name in self.off_apps
 
     def load_personal(self):
         if self.detector is None:
@@ -431,12 +451,16 @@ class Fixer:
         hkl = w.current_layout(hwnd)
         lang = PRIMARY_LANGID.get(w.langid_of(hkl) & 0x3FF)
         seen, self._badge_seen = self._badge_seen, (hwnd, lang)
-        if not seen or seen[0] != hwnd or seen[1] == lang or lang not in self.BADGE:
+        flash, self._flash = self._flash, None
+        if flash:
+            text, color = flash
+        elif not seen or seen[0] != hwnd or seen[1] == lang or lang not in self.BADGE:
             return None
+        else:
+            text, color = self.BADGE[lang]
         if not getattr(self._badge_com, "ready", False):
             w.com_init()
             self._badge_com.ready = True
-        text, color = self.BADGE[lang]
         rect = w.caret_rect()
         if rect:
             x, top, _ = rect
@@ -494,9 +518,22 @@ class Fixer:
             self.hwnd = hwnd
             self.reset()
             self.prev_lang = None
+            self.app_name = w.process_name(hwnd)
+            self.app_off = self.app_name in self.off_apps
 
         if vk in MODIFIERS:
             return False
+        action = self.hotkeys.get((w.key_down(w.VK_CONTROL), w.key_down(w.VK_MENU),
+                                   w.key_down(w.VK_SHIFT),
+                                   w.key_down(w.VK_LWIN) or w.key_down(w.VK_RWIN), vk))
+        if action == "toggle_app":
+            self.toggle_app()
+            return True
+        if self.app_off:
+            return False
+        if action:
+            self.run_hotkey(action)
+            return True
         if self.enter_hold and vk != w.VK_RETURN:
             self.enter_hold = False         # the user went on: the red mark is stale
             self.clear_marks()
@@ -507,9 +544,6 @@ class Fixer:
                 or w.key_down(w.VK_LWIN) or w.key_down(w.VK_RWIN):
             self.reset()
             return False
-        if vk == w.VK_PAUSE:
-            self.manual()
-            return True
         if vk == w.VK_BACK:
             if self.word:
                 self.word.pop()
@@ -567,6 +601,7 @@ class Fixer:
         self.start_watch(single, "early", saved, 0)
         erase = len(corr.old_text) - 1     # the last key never reached the app
         self.actions.put(lambda: self.replace(erase, corr.new_text, target.hkl, None))
+        self.notify_fix("layout")
         log.info("early fix %r -> %r", corr.old_text, corr.new_text)
         return True
 
@@ -602,6 +637,8 @@ class Fixer:
             self.clear_marks()
             self.last_word = None
             return False
+        if self.enabled and self.autotext and self.try_autotext(keys, lay, vk):
+            return True
         caps_keys = fix_accidental_caps(keys, lay) if self.enabled and self.fix_caps else None
         corr = None
         if self.enabled and self.detector is not None:
@@ -644,6 +681,8 @@ class Fixer:
             self.word = keys
             self.enter_hold = True
             self.add_mark(SpellResult(False, old_text, [new_text]), lay.lang)
+            if self.sound:
+                w.play_sound("SystemExclamation")
             log.info("Enter held back for %r -> %r", old_text, new_text)
             return True
         if corr:
@@ -662,6 +701,7 @@ class Fixer:
             self.actions.put(lambda: self.replace(len(corr.old_text), corr.new_text,
                                                   target.hkl, vk, toggle_caps=corr.caps))
             self.shift_marks(len(corr.new_text) - len(corr.old_text))
+            self.notify_fix(kind)
             log.info("fixed %r -> %r", corr.old_text, corr.new_text)
             return True
 
@@ -677,6 +717,7 @@ class Fixer:
             self.actions.put(lambda: self.replace(len(corr.old_text), corr.new_text,
                                                   lay.hkl, vk))
             self.shift_marks(len(corr.new_text) - len(corr.old_text))
+            self.notify_fix("spell")
             log.info("spelling %r -> %r", corr.old_text, corr.new_text)
             return True
         if res and vk == w.VK_SPACE:
@@ -689,6 +730,34 @@ class Fixer:
         self.last_word = (keys, lay, vk)
         return False
 
+    def try_autotext(self, keys, lay, vk):
+        """An abbreviation from autotext.txt, typed in any layout, becomes its text."""
+        on_screen = lay.type_keys(keys)
+        if not on_screen:
+            return False
+        for cand in [lay] + [l for l in self.by_lang.values() if l is not lay]:
+            typed = cand.type_keys(keys)
+            new = userlists.autotext_for(self.autotext, typed) if typed else None
+            if not new:
+                continue
+            self.finished = {"keys": keys, "lay": cand, "text": new, "fixed": True}
+            self.prev_lang = cand.lang
+            self.last_word = None
+            self.watch = None
+            self.actions.put(lambda: self.replace(len(on_screen), new, cand.hkl, vk))
+            self.shift_marks(len(new) - len(on_screen))
+            self.notify_fix("autotext")
+            log.info("autotext %r", typed)
+            return True
+        return False
+
+    def notify_fix(self, kind):
+        """Sound and a short badge at the caret, when the user wants them."""
+        if self.sound:
+            w.play_sound("SystemAsterisk")
+        if self.badge and kind in ("caps", "spell", "autotext"):   # a layout change shows its own badge
+            self._flash = ("✓", "#2e7d32")
+
     def maybe_learn(self, lay, keys):
         from engine import _SCRIPT, _split_core
         _, core, _ = _split_core(lay.type_keys(keys) or "")
@@ -699,9 +768,77 @@ class Fixer:
     def on_click(self):
         self.reset()
 
+    # --- hotkeys
+
+    def run_hotkey(self, action):
+        if action == "manual":
+            self.manual(line=False)
+        elif action == "line":
+            self.manual(line=True)
+        elif action == "selection":
+            self.actions.put(self.convert_selection)
+
+    def toggle_app(self):
+        """Switch the program off (or on again) in the app being typed in."""
+        if not self.app_name:
+            return
+        if self.app_name in self.off_apps:
+            self.off_apps.discard(self.app_name)
+        else:
+            self.off_apps.add(self.app_name)
+        self.app_off = self.app_name in self.off_apps
+        self.reset()
+        apps = set(self.off_apps)
+        self.actions.put(lambda: userlists.write_apps(APPS_FILE, apps, t("apps.header")))
+        self._flash = ("OFF", "#757575") if self.app_off else ("ON", "#2e7d32")
+        w.play_sound("SystemExclamation" if self.app_off else "SystemAsterisk")
+        log.info("%s is %s", self.app_name, "off" if self.app_off else "on")
+
+    def convert_selection(self):
+        """Worker: the selected text goes to the next layout. The selection is
+        copied through the clipboard (which is restored) and typed over."""
+        if w.key_down(w.VK_MENU):
+            w.send_inputs(w.vk_press(0xE8))   # so the Alt release does not open the menu
+        for vk in (w.VK_CONTROL, w.VK_MENU, w.VK_SHIFT, w.VK_LWIN, w.VK_RWIN):
+            for _ in range(50):               # the hotkey's own modifiers must be up
+                if not w.key_down(vk):
+                    break
+                time.sleep(0.02)
+        saved = w.clipboard_get()
+        w.clipboard_set("")
+        w.send_inputs(w.vk_down(w.VK_CONTROL) + w.vk_press(w.VK_C) + w.vk_up(w.VK_CONTROL))
+        text = ""
+        for _ in range(25):
+            time.sleep(0.02)
+            text = w.clipboard_get()
+            if text:
+                break
+        try:
+            source = guess_source(text, list(self.by_lang.values()), prefer=self.layout_now()) \
+                if text else None
+            if source is None:
+                return
+            target = self.next_layout(source)
+            new = convert_text(text, source, target)
+            if new == text:
+                return
+            w.switch_layout(target.hkl)
+            inputs = []
+            for i, line in enumerate(new.replace("\r\n", "\n").split("\n")):
+                inputs += (w.vk_press(w.VK_RETURN) if i else []) + w.unicode_text(line)
+            w.send_inputs(inputs)
+            self.prev_lang = target.lang
+            self.stats.record("manual", text, new, source.lang, target.lang)
+            self.stats.save()
+            log.info("converted a selection of %d characters", len(text))
+        finally:
+            w.clipboard_set(saved)
+
     # --- Pause/Break
 
-    def manual(self):
+    def manual(self, line=None):
+        if line is None:
+            line = w.key_down(w.VK_SHIFT)
         self.watch = None
         if self.last_fix:
             corr, keys, vk, kind, saved = self.last_fix
@@ -734,7 +871,7 @@ class Fixer:
             log.info("undo %r, added to exceptions", word)
             return
 
-        if w.key_down(w.VK_SHIFT):
+        if line:
             self.convert_line()
             return
 
@@ -874,11 +1011,19 @@ class Fixer:
 
 # ---------------------------------------------------------------- tray
 
-def make_icon_image():
+ICON_LANG = {"ka": ("ა", (198, 40, 40)), "en": ("A", (21, 101, 192)), "ru": ("Я", (46, 125, 50))}
+
+
+def make_icon_image(lang=None, off=False):
+    """The tray icon: the current layout's letter on its color; grey when the
+    program is off in this app; the plain blue one when `lang` is None."""
     from PIL import Image, ImageDraw, ImageFont
+    letter, color = ICON_LANG.get(lang, ("ა", (33, 99, 196)))
+    if off:
+        letter, color = "–", (117, 117, 117)
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle((2, 2, 62, 62), radius=14, fill=(33, 99, 196, 255))
+    d.rounded_rectangle((2, 2, 62, 62), radius=14, fill=color + (255,))
     font = None
     for name in ("seguisb.ttf", "segoeui.ttf", "arial.ttf"):
         try:
@@ -886,7 +1031,7 @@ def make_icon_image():
             break
         except OSError:
             continue
-    d.text((32, 33), "ა", fill="white", anchor="mm", font=font or ImageFont.load_default())
+    d.text((32, 33), letter, fill="white", anchor="mm", font=font or ImageFont.load_default())
     return img
 
 
@@ -961,7 +1106,20 @@ def run_tray(fixer, settings):
         fixer.learner.save()
         open_in_notepad(fixer.learner.words_path)
 
+    def open_hotkeys(icon, item):
+        os.makedirs(APP_DIR, exist_ok=True)
+        if not os.path.exists(HOTKEYS_FILE):
+            hk.write_defaults(HOTKEYS_FILE, t("hotkeys.header"))
+        subprocess.Popen(["notepad.exe", HOTKEYS_FILE])
+
+    def open_autotext(icon, item):
+        open_in_notepad(AUTOTEXT_FILE, t("autotext.header"))
+
+    def open_apps(icon, item):
+        open_in_notepad(APPS_FILE, t("apps.header"))
+
     def reload_files(icon, item):
+        fixer.load_user_files()
         if fixer.detector:
             fixer.detector.exceptions = load_exceptions() | fixer.detector.exceptions
         fixer.learner.load()
@@ -1077,11 +1235,16 @@ def run_tray(fixer, settings):
              checked=checked("spell")),
         item("menu.learn", toggle("learn"), checked=checked("learn")),
         item("menu.badge", toggle("badge"), checked=checked("badge")),
+        item("menu.sound", toggle("sound"), checked=checked("sound")),
+        item("menu.tray_icon", toggle("tray_icon"), checked=checked("tray_icon")),
         item("menu.autostart", toggle_autostart, checked=lambda _: autostart_enabled()),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(lambda _: t("menu.language"), languages),
         item("menu.words", open_words),
         item("menu.exceptions", open_exceptions),
+        item("menu.apps", open_apps),
+        item("menu.autotext", open_autotext),
+        item("menu.hotkeys", open_hotkeys),
         item("menu.reload", reload_files),
         item("menu.share", share),
         pystray.Menu.SEPARATOR,
@@ -1089,6 +1252,25 @@ def run_tray(fixer, settings):
         item("menu.quit", quit_app),
     )
     icon = TrayIcon(APP_NAME, make_icon_image(), t("tray.title"), menu)
+
+    def follow_layout():
+        """The tray icon shows the layout of the window being typed in."""
+        shown = None
+        while True:
+            time.sleep(0.4)
+            try:
+                if not fixer.tray_icon:
+                    want = None
+                else:
+                    hkl = w.current_layout(w.foreground_window())
+                    lang = PRIMARY_LANGID.get(w.langid_of(hkl) & 0x3FF)
+                    want = (lang, fixer.app_off) if lang in ICON_LANG else shown
+                if want != shown:
+                    shown = want
+                    icon.icon = make_icon_image(*(want or (None, False)))
+            except Exception:
+                log.exception("tray icon update failed")
+    threading.Thread(target=follow_layout, daemon=True).start()
     if updater.can_update():
         threading.Thread(target=check_daily, daemon=True).start()
     icon.run()
@@ -1139,6 +1321,9 @@ def main():
     fixer.early = settings.get("early", True)
     fixer.learn = settings.get("learn", True)
     fixer.badge = settings.get("badge", True)
+    fixer.sound = settings.get("sound", False)
+    fixer.tray_icon = settings.get("tray_icon", True)
+    fixer.load_user_files()
     fixer.learner = Learner(APP_DIR)
     fixer.feedback = Feedback(os.path.join(APP_DIR, "feedback.json"))
     try:

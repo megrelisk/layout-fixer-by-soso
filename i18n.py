@@ -54,6 +54,45 @@ TEXTS = {
     "menu.badge": {"ka": "ენის მაჩვენებელი კურსორთან",
                    "en": "Show language at the cursor",
                    "ru": "Показывать язык у курсора"},
+    "menu.sound": {"ka": "ხმოვანი სიგნალი გასწორებისას", "en": "Sound when something is fixed",
+                   "ru": "Звук при исправлении"},
+    "menu.tray_icon": {"ka": "ენა ხატულაზე (ტრეი)", "en": "Show language in the tray icon",
+                       "ru": "Язык на значке в трее"},
+    "menu.apps": {"ka": "პროგრამები, სადაც გამორთულია...", "en": "Apps where it is off...",
+                  "ru": "Программы, где отключено..."},
+    "menu.autotext": {"ka": "ავტოჩანაცვლება (აბრევიატურები)...", "en": "Autotext (abbreviations)...",
+                      "ru": "Автозамена (аббревиатуры)..."},
+    "menu.hotkeys": {"ka": "ცხელი კლავიშები...", "en": "Hotkeys...", "ru": "Горячие клавиши..."},
+    "hotkeys.header": {
+        "ka": "# ცხელი კლავიშები: მოქმედება = კლავიშები. შემდეგ: მენიუ → თავიდან წაკითხვა.\n"
+              "# manual: გასწორების გაუქმება ან სიტყვის გადაკეთება; line: მთელი ხაზი;\n"
+              "# selection: მონიშნული ტექსტი; toggle_app: გამორთვა/ჩართვა ამ პროგრამაში.\n"
+              "# კლავიშები: ctrl, alt, shift, win + A-Z, 0-9, F1-F24, Pause, Break, Insert, Home...\n",
+        "en": "# Hotkeys: action = keys. Then: menu -> Reload.\n"
+              "# manual: undo a fix or convert the word; line: the whole line;\n"
+              "# selection: the selected text; toggle_app: off/on in the current app.\n"
+              "# Keys: ctrl, alt, shift, win + A-Z, 0-9, F1-F24, Pause, Break, Insert, Home...\n",
+        "ru": "# Горячие клавиши: действие = клавиши. Потом: меню -> Перечитать.\n"
+              "# manual: отмена исправления или конвертация слова; line: вся строка;\n"
+              "# selection: выделенный текст; toggle_app: выкл/вкл в этой программе.\n"
+              "# Клавиши: ctrl, alt, shift, win + A-Z, 0-9, F1-F24, Pause, Break, Insert, Home...\n",
+    },
+    "autotext.header": {
+        "ka": "# ავტოჩანაცვლება: აბრევიატურა = ტექსტი (მაგ. \"mb = may be\").\n"
+              "# მუშაობს სიტყვის დასრულებისას, ნებისმიერ განლაგებაში. შემდეგ: მენიუ → თავიდან წაკითხვა.\n",
+        "en": "# Autotext: abbreviation = text (e.g. \"mb = may be\").\n"
+              "# Works when a word is finished, in any layout. Then: menu -> Reload.\n",
+        "ru": "# Автозамена: аббревиатура = текст (напр. \"мб = может быть\").\n"
+              "# Работает при завершении слова, в любой раскладке. Потом: меню -> Перечитать.\n",
+    },
+    "apps.header": {
+        "ka": "# პროგრამები, სადაც LayoutFixer არაფერს აკეთებს: ერთი სახელი ხაზზე (მაგ. game.exe).\n"
+              "# ცხელი კლავიში toggle_app ამატებს/შლის მიმდინარე პროგრამას. შემდეგ: მენიუ → თავიდან წაკითხვა.\n",
+        "en": "# Apps where LayoutFixer does nothing: one name per line (e.g. game.exe).\n"
+              "# The toggle_app hotkey adds/removes the current app. Then: menu -> Reload.\n",
+        "ru": "# Программы, где LayoutFixer ничего не делает: по имени на строку (напр. game.exe).\n"
+              "# Горячая клавиша toggle_app добавляет/убирает текущую программу. Потом: меню -> Перечитать.\n",
+    },
     "menu.autostart": {"ka": "Windows-თან ერთად ჩართვა", "en": "Start with Windows",
                        "ru": "Запускать вместе с Windows"},
     "menu.language": {"ka": "ენა / Language / Язык", "en": "ენა / Language / Язык",
