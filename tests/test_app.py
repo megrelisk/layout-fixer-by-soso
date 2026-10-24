@@ -69,6 +69,7 @@ def env(monkeypatch, detector):
     import app
     fixer = app.Fixer()
     fixer.refresh_layouts()
+    monkeypatch.setattr(detector, "exceptions", set(detector.exceptions))   # per-test copy
     fixer.detector = detector
     fixer.early = False         # tested on its own below
     done = []

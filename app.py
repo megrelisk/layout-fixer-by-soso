@@ -114,7 +114,7 @@ MAX_MARKS = 5
 LINE_WORDS = 10         # earlier words of the line kept for fixing together
 WATCH_SECONDS = 30      # Backspace into a fix this soon after it means "that was wrong"
 WATCH_CHARS = 40
-STRIKES_TO_STOP = 2     # erased this many times: never fix the word again
+STRIKES_TO_STOP = 1     # erased this many times: never fix the word again
 
 
 @dataclass
@@ -138,6 +138,7 @@ class Fixer:
         self.badge = True
         self.early_done = False     # the current word was already switched early
         self.watch = None           # the last automatic fix, watched for Backspace
+        self.enter_hold = False     # Enter was held back: the last word waits for a decision
         self.sel = None             # while selecting backwards after a fix: how far back
         self.line = []              # earlier words of this line: {keys, lay, text, fixed}
         self.finished = None        # the word check_word just finished, for self.line
@@ -213,6 +214,7 @@ class Fixer:
         self.last_word = None
         self.last_fix = None
         self.watch = None
+        self.enter_hold = False
         self.line = []
         self.clear_marks()
 
@@ -495,6 +497,9 @@ class Fixer:
 
         if vk in MODIFIERS:
             return False
+        if self.enter_hold and vk != w.VK_RETURN:
+            self.enter_hold = False         # the user went on: the red mark is stale
+            self.clear_marks()
         handled = self.on_edit_key(vk)
         if handled is not None:
             return handled
@@ -568,6 +573,8 @@ class Fixer:
     def on_boundary(self, vk):
         self.finished = None
         swallowed = self.check_word(vk)
+        if self.enter_hold:
+            return True                     # Enter held back, the word stays as typed
         self.remember_word(vk)
         if vk == w.VK_SPACE:
             self.shift_marks(1)
@@ -586,8 +593,13 @@ class Fixer:
             log.info("learned a new word (%s)", learned[0])
         keys, self.word = self.word, []
         self.last_fix = None
+        held, self.enter_hold = self.enter_hold, False
         lay = self.layout_now()
         if not keys or lay is None:
+            self.last_word = None
+            return False
+        if held and vk == w.VK_RETURN:      # second Enter: send the word as it is
+            self.clear_marks()
             self.last_word = None
             return False
         caps_keys = fix_accidental_caps(keys, lay) if self.enabled and self.fix_caps else None
@@ -624,6 +636,16 @@ class Fixer:
             corr = None
         if res and res.auto and self.feedback.struck(res.old_text):
             res = SpellResult(False, res.old_text, res.suggestions)
+        if vk == w.VK_RETURN and self.enabled and (corr or (res and res.auto)):
+            # Enter would send a word that is about to be changed: hold it back
+            # and mark the word; Enter again sends it unchanged.
+            new_text = corr.new_text if corr else res.new_text
+            old_text = corr.old_text if corr else res.old_text
+            self.word = keys
+            self.enter_hold = True
+            self.add_mark(SpellResult(False, old_text, [new_text]), lay.lang)
+            log.info("Enter held back for %r -> %r", old_text, new_text)
+            return True
         if corr:
             word_text, single = corr.new_text, corr
             corr = self.with_earlier(corr, lay)
